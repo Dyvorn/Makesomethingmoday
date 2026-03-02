@@ -1,3 +1,6 @@
+
+#made in one hour for fun, inspired by the neon aesthetic and the classic higher/lower game.
+
 import random
 import tkinter as tk
 from tkinter import ttk
