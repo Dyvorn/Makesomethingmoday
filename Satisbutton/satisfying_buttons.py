@@ -3,6 +3,7 @@ import random
 import sys
 import struct
 import time
+import threading
 import warnings
 
 warnings.filterwarnings("ignore", category=UserWarning, message=".*pkg_resources.*")
@@ -16,6 +17,16 @@ try:
     except ImportError:
         PYPERCLIP_AVAILABLE = False
         print("Warning: pyperclip not found. 'Copy Code' will not work. Install with: pip install pyperclip")
+    try:
+        import numpy as np
+        NUMPY_AVAILABLE = True
+    except ImportError:
+        NUMPY_AVAILABLE = False
+    try:
+        import sounddevice as sd
+        SOUNDDEVICE_AVAILABLE = True
+    except ImportError:
+        SOUNDDEVICE_AVAILABLE = False
 except Exception as e:
     print("Missing dependency: pygame is required. Install with: pip install pygame")
     raise
@@ -28,11 +39,20 @@ ACCENT = (110, 231, 183)
 SECOND = (96, 165, 250)
 TERTIARY = (236, 72, 153)
 NEUMORPHIC_BASE = (224, 229, 236)
-DARK_PANEL = (20, 25, 35)
+DARK_PANEL = (20, 25, 35) 
+RANDOM_COLORS = [ACCENT, SECOND, TERTIARY, (245,158,11), (16,185,129)]
 
 # --- Sound helper (generate simple tone) ---
 SAMPLE_RATE = 44100
 DEFAULT_VOL = 0.12
+
+def get_text_color_for_bg(bg_color):
+    """Chooses black or white text based on background luminance."""
+    if not bg_color: return (240, 240, 255)
+    r, g, b = bg_color[:3]
+    # Formula for luminance
+    luminance = (0.299 * r + 0.587 * g + 0.114 * b)
+    return (30, 30, 35) if luminance > 140 else (240, 240, 255)
 
 def make_tone(freq=440.0, duration=0.18, volume=0.12):
     n_samples = int(SAMPLE_RATE * duration)
@@ -55,9 +75,29 @@ class Particle:
         self.size = size; self.color = color
         self.kind = kind
         self.gravity = gravity
+        self.stick_timer = 0
         self.angle = random.random() * 360
 
-    def update(self):
+    def update(self, app):
+        # Special logic for sticky liquid
+        if self.kind == 'sticky_liquid' and app:
+            mouse_pos = app.mouse_pos
+            if self.stick_timer > 0:
+                self.x, self.y = mouse_pos
+                self.stick_timer -= 1
+                self.life -= 0.5 # Die slower while stuck
+                if self.stick_timer <= 0: # Fell off
+                    self.gravity = 0.4 # Start falling
+                return # Skip normal physics
+            else:
+                dist_to_mouse = math.hypot(self.x - mouse_pos[0], self.y - mouse_pos[1])
+                if dist_to_mouse < 20:
+                    self.stick_timer = random.randint(40, 80) # Stick for a bit
+                    self.vx, self.vy = 0, 0
+                else: # Move towards mouse
+                    self.vx += (mouse_pos[0] - self.x) * 0.01
+                    self.vy += (mouse_pos[1] - self.y) * 0.01
+
         self.vy += self.gravity
         self.x += self.vx; self.y += self.vy
         self.vx *= 0.96 # Air resistance
@@ -97,6 +137,20 @@ class Particle:
             r = int(current_size)
             pygame.draw.line(surf, col, (self.x - r, self.y), (self.x + r, self.y), 2)
             pygame.draw.line(surf, col, (self.x, self.y - r), (self.x, self.y + r), 2)
+        elif self.kind == 'triangle':
+            size = int(current_size)
+            points = [(-size, -size//2), (size, -size//2), (0, size//2)]
+            rad = math.radians(self.angle)
+            cos_a, sin_a = math.cos(rad), math.sin(rad)
+            rotated_points = [(self.x + x*cos_a - y*sin_a, self.y + x*sin_a + y*cos_a) for x, y in points]
+            try:
+                pygame.gfxdraw.filled_polygon(surf, rotated_points, col)
+            except: pass # Can fail if points are off-screen
+        elif self.kind == 'sparkle':
+            # Cross shape
+            r = int(current_size)
+            pygame.draw.line(surf, col, (self.x - r, self.y), (self.x + r, self.y), 2)
+            pygame.draw.line(surf, col, (self.x, self.y - r), (self.x, self.y + r), 2)
         else:
             r = int(current_size)
             if r > 0:
@@ -105,7 +159,7 @@ class Particle:
 class TextParticle(Particle):
     def __init__(self, x, y, text, color, life):
         super().__init__(x, y, 0, -1.5, life, 0, color, kind='text', gravity=0.05)
-        self.font = pygame.font.SysFont('Segoe UI', 18, bold=True)
+        self.font = pygame.font.SysFont('arial', 20, bold=True)
         self.text = text
 
     def draw(self, surf):
@@ -117,46 +171,29 @@ class TextParticle(Particle):
         
         surf.blit(text_surf, text_surf.get_rect(center=(self.x, self.y)))
 
-class Slider:
-    def __init__(self, x, y, w, min_val, max_val, value, label):
-        self.rect = pygame.Rect(x, y, w, 6)
-        self.knob_rect = pygame.Rect(x, y-7, 14, 20)
-        self.min_val = min_val
-        self.max_val = max_val
-        self.value = value
-        self.label = label
-        self.dragging = False
-        self.update_knob()
-
-    def update_knob(self):
-        ratio = (self.value - self.min_val) / (self.max_val - self.min_val)
-        self.knob_rect.centerx = self.rect.x + self.rect.w * ratio
-
-    def update(self, mx, my, down):
-        if down:
-            if self.knob_rect.collidepoint(mx, my) or self.rect.collidepoint(mx, my):
-                self.dragging = True
-        else:
-            self.dragging = False
-        
-        if self.dragging:
-            ratio = (mx - self.rect.x) / self.rect.w
-            ratio = max(0, min(1, ratio))
-            self.value = self.min_val + ratio * (self.max_val - self.min_val)
-            self.update_knob()
-            return True
-        return False
-
-    def draw(self, surf, font):
-        lbl = font.render(f"{self.label}: {self.value:.2f}", True, (200, 200, 200))
-        surf.blit(lbl, (self.rect.x, self.rect.y - 25))
-        pygame.draw.rect(surf, (60, 60, 70), self.rect, border_radius=3)
-        
-        is_hovered = self.knob_rect.collidepoint(pygame.mouse.get_pos())
-        active_color = ACCENT if self.dragging or is_hovered else (180, 180, 200)
-        pygame.draw.rect(surf, active_color, (self.rect.x, self.rect.y, self.knob_rect.centerx - self.rect.x, 6), border_radius=3)
-        knob_color = (255, 255, 255) if self.dragging or is_hovered else (220, 220, 240)
-        pygame.draw.rect(surf, knob_color, self.knob_rect, border_radius=5)
+BUTTON_COLOR_MAP = {
+    'liquid': (180, 220, 255),
+    'toggle': (150, 160, 180),
+    'morph': (147, 112, 219),
+    'retro': (192, 192, 192),
+    'cyber': (255, 230, 0),
+    'soft': (255, 180, 190),
+    'intro_orb': (200, 230, 255),
+    'link': ACCENT,
+    'primary': ACCENT,
+    'secondary': (150, 160, 170),
+    'danger': (239, 68, 68),
+    'download': SECOND,
+    'fab': ACCENT,
+    'social': (59, 130, 246), # Blue
+    'menu': (40, 50, 70), # Dark background for menu button usually
+    'status': (40, 50, 70),
+    'music': (236, 72, 153),
+}
+RANDOM_COLOR_VARIANTS = [
+    'bubble', 'candy', 'ripple', 'pixel', 'firefly', 
+    'glitch', 'ghost', 'gradient', 'shatter', 'jelly'
+]
 
 class Button:
     def __init__(self, app, x, y, w, h, text, variant='standard', command=None):
@@ -181,20 +218,76 @@ class Button:
         self.anim_state = 'active' # active, entering, exiting
         self.anim_progress = 0.0
         self.command = command
+        self.toggled_on = False
+        self.morph_progress = 0.0
+        self.knob_x = 0
+        self.liquid_distortion = 0.0
+        self.underline_progress = 0.0
+        self.text_cycle_index = 0
+        self.hold_progress = 0.0
+        self.download_progress = 0.0
+        self.download_state = 'idle' # idle, downloading, done
+        self.slider_val = 0.5
+        self.shatter_cooldown = 0
+        self.toggle_progress = 0.0
+        self.music_playing = False
+        self.music_bar_heights = [0.1] * 16
+        self.is_realtime_audio = self.app.audio_stream is not None
         
-        # Set specific colors for variants
-        if self.variant in ['bubble', 'candy', 'ripple', 'pixel', 'firefly', 'glitch']:
-             self.color = random.choice([ACCENT, SECOND, TERTIARY, (245,158,11), (16,185,129)])
-             self.current_color = list(self.color)
-        if self.variant == 'retro': self.color = (192, 192, 192)
-        if self.variant == 'cyber': self.color = (255, 230, 0)
-        if self.variant == 'soft': self.color = (255, 180, 190)
-        if self.variant == 'intro_orb': self.color = (255, 255, 255)
+        # Refactored color initialization
+        self.color = BUTTON_COLOR_MAP.get(self.variant)
+        if self.color is None:
+            if self.variant in RANDOM_COLOR_VARIANTS:
+                self.color = random.choice(RANDOM_COLORS)
+            else:
+                self.color = (40, 50, 70) # Default
+
+        self.current_color = list(self.color)
         self.scale = 1.0
         self.orb_angle = 0.0
         self.orb_velocity = 2.0
         self.val_pull = 0.0
         self.time_offset = random.random() * 100
+        
+        # Refactored draw handlers
+        self.draw_handlers = {
+            'bubble': self._draw_circular, 'candy': self._draw_circular, 'coin': self._draw_circular,
+            'blackhole': self._draw_circular, 'firefly': self._draw_circular, 'slime': self._draw_circular,
+            'grow': self._draw_circular,
+            'pixel': self._draw_pixel, 'glitch': self._draw_pixel,
+            'laser': self._draw_laser,
+            'ui': self._draw_ui,
+            'neumorphic': self._draw_neumorphic,
+            'glass': self._draw_glass,
+            'outline': self._draw_outline,
+            'retro': self._draw_retro,
+            'cyber': self._draw_cyber,
+            'soft': self._draw_soft,
+            'toggle': self._draw_toggle,
+            'morph': self._draw_morph,
+            'liquid': self._draw_liquid,
+            'intro_orb': self._draw_intro_orb,
+            'load_spinner': self._draw_load_card,
+            'load_bar': self._draw_load_card,
+            'load_dots': self._draw_load_card,
+            'load_pulse': self._draw_load_card,
+            'header': self._draw_header,
+            'shiny': self._draw_shiny,
+            'holographic': self._draw_holographic,
+            'jelly': self._draw_jelly,
+            'ghost': self._draw_ghost,
+            'gradient': self._draw_gradient,
+            'link': self._draw_link,
+            'primary': self._draw_flat, 'secondary': self._draw_flat, 'danger': self._draw_flat,
+            'download': self._draw_download,
+            'hold': self._draw_hold,
+            'slider': self._draw_slider,
+            'fab': self._draw_fab,
+            'menu': self._draw_menu,
+            'social': self._draw_social,
+            'status': self._draw_status,
+            'music': self._draw_music,
+        }
 
     def contains(self, px, py):
         if not self.visible: return False
@@ -213,6 +306,35 @@ class Button:
         pull = pull * pull # Quadratic ease-in for smoother onset
         self.val_pull = pull
 
+        # Liquid button "sucks in" the mouse cursor with particles
+        if self.variant == 'liquid':
+            if pull > 0.1 and random.random() < pull * 0.4: # Spawn more particles the closer the mouse is
+                    # Spawn particle at mouse position
+                    px, py = mx, my
+                    
+                    # Calculate velocity vector towards the button's center
+                    dist_x = self.x - px
+                    dist_y = self.y - py
+                    dist_total = math.hypot(dist_x, dist_y)
+                    
+                    if dist_total > 1:
+                        # Normalize vector and add speed
+                        speed = random.uniform(4, 9)
+                        vx = (dist_x / dist_total) * speed + random.uniform(-1, 1)
+                        vy = (dist_y / dist_total) * speed + random.uniform(-1, 1)
+                        self.app.particles.append(Particle(px, py, vx, vy, 25, random.uniform(1, 4), (200, 230, 255), 'pixel', gravity=0))
+            
+            # Lose liquid that sticks to mouse
+            if pull > 0.7 and random.random() < 0.08:
+                angle_to_mouse = math.atan2(my - self.y, mx - self.x)
+                # Spawn from the edge of the button
+                spawn_x = self.x + math.cos(angle_to_mouse) * self.w / 2.2
+                spawn_y = self.y + math.sin(angle_to_mouse) * self.h / 2.2
+                
+                p = Particle(spawn_x, spawn_y, 0, 0, 150, random.uniform(5, 10), 
+                             (200, 230, 255, 150), 'sticky_liquid', gravity=0)
+                self.app.particles.append(p)
+
         # Target visual position (Magnetic pull)
         target_vis_x = self.x + (mx - self.x) * pull * 0.2
         target_vis_y = self.y + (my - self.y) * pull * 0.2
@@ -229,8 +351,45 @@ class Button:
         if not self.hover and not self.pressed:
              self.target_scale = 1.0 + pull * 0.15
 
+        # Morphing logic
+        if self.variant == 'morph':
+            target_morph = 1.0 if self.hover else 0.0
+            self.morph_progress += (target_morph - self.morph_progress) * 0.1
+            
+        # Toggle progress smoothing
+        target_toggle = 1.0 if self.toggled_on else 0.0
+        self.toggle_progress += (target_toggle - self.toggle_progress) * 0.15
+
+        if self.shatter_cooldown > 0:
+            self.shatter_cooldown -= 1
+
+        # Hold button logic
+        if self.variant == 'hold':
+            if self.pressed:
+                self.hold_progress += 0.015
+                if self.hold_progress >= 1.0:
+                    self.hold_progress = 0.0
+                    self.activate()
+                    self.pressed = False # Reset
+            else:
+                self.hold_progress = max(0, self.hold_progress - 0.05)
+
+        # Download button logic
+        if self.variant == 'download':
+            if self.download_state == 'downloading':
+                self.download_progress += 0.005
+                if self.download_progress >= 1.0:
+                    self.download_progress = 1.0
+                    self.download_state = 'done'
+                    self.text = "DONE"
+                    self.app.play_click('success')
+
+        # Slider logic
+        if self.variant == 'slider' and self.pressed:
+            self.slider_val = max(0.0, min(1.0, (mx - (self.x - self.w/2)) / self.w))
+
         # Intro Orb Physics (Smooth Rotation)
-        if self.variant == 'intro_orb':
+        if self.variant == 'intro_orb' and not self.app.intro_sequence:
             # Base speed 2, adds up to 10 from proximity, jumps to 25 on hover. Smoother lerp.
             target_vel = 2.0 + pull * 10.0
             if self.hover: target_vel = 25.0
@@ -251,8 +410,16 @@ class Button:
         self.scale += self.scale_vel
         self.wobble *= 0.92
 
+        if self.variant == 'link':
+            target_underline = 1.0 if self.hover else 0.0
+            self.underline_progress += (target_underline - self.underline_progress) * 0.15
+ 
         # Animation state machine
         if self.anim_state in ['entering', 'exiting']:
+            if self.anim_progress < 0:
+                self.anim_progress += 0.05 # Delay timer
+                return
+
             self.anim_progress += 0.05
             if self.anim_progress >= 1.0:
                 self.anim_progress = 1.0
@@ -260,7 +427,7 @@ class Button:
                 self.anim_state = 'active'
 
         # Intro Orb Suction Effect
-        if self.variant == 'intro_orb' and self.hover:
+        if self.variant == 'intro_orb' and self.hover and not self.app.intro_sequence:
              if random.random() < 0.6:
                  angle = random.uniform(0, 6.28)
                  dist = 110 # Start further out
@@ -282,7 +449,7 @@ class Button:
                  self.app.particles.append(Particle(self.x + random.uniform(-self.w/2, self.w/2), self.y + self.h/2, 0, random.uniform(-1, -2), 25, 2, p_col, 'pixel', gravity=0))
 
     def draw(self, surf):
-        if not self.visible: return
+        if not self.visible or self.shatter_cooldown > 0: return
         
         # Apply wobble to scale
         s = self.scale + math.sin(time.time() * 20) * self.wobble
@@ -319,21 +486,33 @@ class Button:
 
         # Entry/Exit animation
         if self.anim_state == 'entering':
+            if self.anim_progress < 0: return # In delay, don't draw
+
             eased_prog = 1 - (1 - self.anim_progress)**3
             cy = self.vis_y - self.app.H * (1 - eased_prog)
         elif self.anim_state == 'exiting':
             eased_prog = self.anim_progress**3
             cy = self.vis_y + self.app.H * eased_prog
 
-        if self.variant == 'header':
-            font = self.app.font_small
-            txt = font.render(self.text, True, (100, 110, 130))
-            surf.blit(txt, txt.get_rect(center=(cx, cy + 10)))
-            pygame.draw.line(surf, (40, 50, 60), (cx - 120, cy + 25), (cx + 120, cy + 25), 1)
-            return
-
         # --- SHAPE RENDERING ---
-        if self.variant in ['bubble', 'candy', 'coin', 'blackhole', 'firefly', 'slime', 'grow']:
+        handler = self.draw_handlers.get(self.variant)
+        rect = None
+        if handler:
+            rect = handler(surf, cx, cy, w, h, draw_color)
+        else:
+            rect = self._draw_standard(surf, cx, cy, w, h, draw_color)
+
+        # --- TEXT & COUNTER RENDERING ---
+        if self.variant not in ['header', 'toggle', 'intro_orb', 'load_spinner', 'load_bar', 'load_dots', 'load_pulse', 'link', 'slider', 'fab', 'menu', 'social', 'music']:
+            self._draw_text(surf, rect if rect else pygame.Rect(cx-w/2, cy-h/2, w, h))
+
+    def _draw_header(self, surf, cx, cy, w, h, draw_color):
+        font = self.app.font_small
+        txt = font.render(self.text, True, (100, 110, 130))
+        surf.blit(txt, txt.get_rect(center=(cx, cy + 10)))
+        pygame.draw.line(surf, (40, 50, 60), (cx - 120, cy + 25), (cx + 120, cy + 25), 1)
+
+    def _draw_circular(self, surf, cx, cy, w, h, draw_color):
             # CIRCULAR SHAPE
             r = int(min(w, h) / 2.2) # Slightly smaller for padding
             # Shadow
@@ -368,10 +547,9 @@ class Button:
             # Gloss
             pygame.gfxdraw.filled_circle(surf, int(cx - r*0.3), int(cy - r*0.3), int(r*0.25), (255,255,255,80))
             
-            # Text offset for circle
-            rect = pygame.Rect(cx-w/2, cy-h/2, w, h)
+            return pygame.Rect(cx-w/2, cy-h/2, w, h)
 
-        elif self.variant == 'pixel' or self.variant == 'glitch':
+    def _draw_pixel(self, surf, cx, cy, w, h, draw_color):
             # PIXEL ART SHAPE (Sharp Rect)
             rect = pygame.Rect(int(cx - w/2), int(cy - h/2), int(w), int(h))
             # Hard Shadow
@@ -390,39 +568,61 @@ class Button:
                     gy = rect.y + random.randint(0, int(h))
                     gr = pygame.Rect(gx, gy, random.randint(10, 40), random.randint(2, 6))
                     pygame.draw.rect(surf, random.choice([(255,50,50), (50,255,255), (20,20,20)]), gr)
+            return rect
 
-        elif self.variant == 'laser':
-            # NEON RECT SHAPE
-            rect = pygame.Rect(int(cx - w/2), int(cy - h/2), int(w), int(h))
-            # Glow
-            for i in range(1, 4):
-                pygame.draw.rect(surf, (*self.color[:3], 50//i), rect.inflate(i*6, i*6), 1, border_radius=4)
-            pygame.draw.rect(surf, (10,10,10), rect, border_radius=4)
-            pygame.draw.rect(surf, draw_color, rect, 2, border_radius=4)
+    def _draw_laser(self, surf, cx, cy, w, h, draw_color):
+        # NEON RECT SHAPE
+        rect = pygame.Rect(int(cx - w/2), int(cy - h/2), int(w), int(h))
+        
+        # Refined Glow
+        glow_surf = pygame.Surface((w + 20, h + 20), pygame.SRCALPHA)
+        pygame.draw.rect(glow_surf, (*self.color[:3], 80), glow_surf.get_rect(), border_radius=10)
+        # Fake a blur with downscaling and upscaling
+        if w > 4 and h > 4:
+            small = pygame.transform.smoothscale(glow_surf, (int((w+20)/4), int((h+20)/4)))
+            glow_surf = pygame.transform.smoothscale(small, (int(w+20), int(h+20)))
+        surf.blit(glow_surf, (cx - w/2 - 10, cy - h/2 - 10), special_flags=pygame.BLEND_RGBA_ADD)
+        pygame.draw.rect(surf, (10,10,10), rect, border_radius=4)
+        pygame.draw.rect(surf, draw_color, rect, 2, border_radius=4)
+        return rect
 
-        elif self.variant == 'ui':
+    def _draw_ui(self, surf, cx, cy, w, h, draw_color):
             rect = pygame.Rect(int(cx - w/2), int(cy - h/2), int(w), int(h))
             # Clean, sharp look for UI
             shadow_color = (*self.app.accent_color[:3], 40) if self.hover else (0,0,0,60)
             shadow_offset = 2 if self.hover else 4
             pygame.draw.rect(surf, shadow_color, rect.move(0, shadow_offset), border_radius=8)
             
-            pygame.draw.rect(surf, draw_color, rect, border_radius=8)
+            # Subtle gradient on hover
+            if self.hover:
+                top_color = tuple(min(255, c+15) for c in draw_color)
+                bottom_color = tuple(max(0, c-15) for c in draw_color)
+                pygame.draw.rect(surf, top_color, (rect.x, rect.y, rect.w, rect.h/2), border_top_left_radius=8, border_top_right_radius=8)
+                pygame.draw.rect(surf, bottom_color, (rect.x, rect.centery, rect.w, rect.h/2), border_bottom_left_radius=8, border_bottom_right_radius=8)
+            else:
+                pygame.draw.rect(surf, draw_color, rect, border_radius=8)
             
             if self.hover:
                 pygame.draw.rect(surf, self.app.accent_color, rect, 2, border_radius=8)
+            return rect
 
-        elif self.variant == 'neumorphic':
+    def _draw_neumorphic(self, surf, cx, cy, w, h, draw_color):
             rect = pygame.Rect(int(cx - w/2), int(cy - h/2), int(w), int(h))
             # Light source top-left
-            light_color = (255, 255, 255)
-            shadow_color = (163, 177, 198)
+            light_color = (255, 255, 255, 90)
+            shadow_color = (163, 177, 198, 180)
             base_color = NEUMORPHIC_BASE
             
             if self.pressed:
                 # Inner shadow look
-                pygame.draw.rect(surf, base_color, rect, border_radius=12)
-                pygame.draw.rect(surf, shadow_color, rect, 2, border_radius=12) # Simple inset simulation
+                inset_rect = rect.inflate(-4, -4)
+                pygame.draw.rect(surf, (208, 215, 224), rect, border_radius=12) # Slightly darker base
+                # Top-left inner shadow (dark)
+                pygame.gfxdraw.box(surf, inset_rect, (*shadow_color[:3], 30))
+                # Bottom-right inner shadow (light) - faked with a subtractive blend
+                s = pygame.Surface((w,h), pygame.SRCALPHA)
+                pygame.draw.rect(s, light_color, s.get_rect().move(2,2), border_radius=12)
+                surf.blit(s, rect.topleft, special_flags=pygame.BLEND_RGBA_SUB)
             else:
                 # Outer shadow
                 # Dark shadow bottom-right
@@ -430,19 +630,24 @@ class Button:
                 # Light shadow top-left
                 pygame.draw.rect(surf, light_color, rect.move(-4, -4), border_radius=12)
                 pygame.draw.rect(surf, base_color, rect, border_radius=12)
+            return rect
 
-        elif self.variant == 'glass':
+    def _draw_glass(self, surf, cx, cy, w, h, draw_color):
             rect = pygame.Rect(int(cx - w/2), int(cy - h/2), int(w), int(h))
-            # Semi-transparent white body
-            s = pygame.Surface((int(w), int(h)), pygame.SRCALPHA)
-            s.fill((255, 255, 255, 30))
-            surf.blit(s, rect.topleft)
+            
+            # Create a surface for the glass effect
+            glass_surf = pygame.Surface((int(w), int(h)), pygame.SRCALPHA)
+            # Frosted glass body
+            glass_surf.fill((255, 255, 255, 25))
+            # Angled shine/highlight
+            shine_poly = [ (0,0), (w*0.6, 0), (w*0.3, h), (0,h) ]
+            pygame.draw.polygon(glass_surf, (255,255,255,30), shine_poly)
+            surf.blit(glass_surf, rect.topleft)
             # Border
             pygame.draw.rect(surf, (255, 255, 255, 100), rect, 1, border_radius=12)
-            # Shine
-            pygame.draw.line(surf, (255, 255, 255, 80), (rect.left + 10, rect.top + 10), (rect.right - 10, rect.bottom - 20), 20)
+            return rect
 
-        elif self.variant == 'outline':
+    def _draw_outline(self, surf, cx, cy, w, h, draw_color):
             rect = pygame.Rect(int(cx - w/2), int(cy - h/2), int(w), int(h))
             col = ACCENT if self.hover else (150, 150, 150)
             pygame.draw.rect(surf, col, rect, 2, border_radius=8)
@@ -450,8 +655,9 @@ class Button:
                 s = pygame.Surface((int(w), int(h)), pygame.SRCALPHA)
                 s.fill((*col[:3], 50))
                 surf.blit(s, rect.topleft)
+            return rect
 
-        elif self.variant == 'retro':
+    def _draw_retro(self, surf, cx, cy, w, h, draw_color):
             rect = pygame.Rect(int(cx - w/2), int(cy - h/2), int(w), int(h))
             base = (192, 192, 192)
             light = (255, 255, 255)
@@ -468,8 +674,9 @@ class Button:
                 pygame.draw.line(surf, black, (rect.left, rect.bottom-1), (rect.right, rect.bottom-1), 1)
             else:
                 pygame.draw.rect(surf, dark, rect, 2)
+            return rect
 
-        elif self.variant == 'cyber':
+    def _draw_cyber(self, surf, cx, cy, w, h, draw_color):
             rect = pygame.Rect(int(cx - w/2), int(cy - h/2), int(w), int(h))
             cut = 15
             pts = [
@@ -478,191 +685,535 @@ class Button:
                 (rect.left, rect.bottom), (rect.left, rect.top + cut)
             ]
             col = draw_color if not self.hover else (255, 255, 150)
-            pygame.draw.polygon(surf, col, pts)
+            
+            # Base with subtle gradient
+            grad_surf = pygame.Surface((w,h), pygame.SRCALPHA)
+            pygame.draw.polygon(grad_surf, col, [(p[0]-rect.left, p[1]-rect.top) for p in pts])
+            for i in range(int(h)):
+                alpha = int(20 * (i/h))
+                pygame.draw.line(grad_surf, (0,0,0,alpha), (0,i), (w,i))
+            surf.blit(grad_surf, rect.topleft)
+            
             pygame.draw.polygon(surf, (0,0,0), pts, 3)
-            # Tech lines
-            # Scanline effect
+            
             scan_speed = 50 + self.val_pull * 100
-            scan_y = int(rect.top + (time.time() * scan_speed) % h)
-            if rect.top < scan_y < rect.bottom:
-                pygame.draw.line(surf, (255, 255, 255, 150), (rect.left, scan_y), (rect.right, scan_y), 1)
-            pygame.draw.line(surf, (0,0,0), (rect.left + cut + 5, rect.top + 8), (rect.right - 5, rect.top + 8), 2)
-            pygame.draw.line(surf, (0,0,0), (rect.left + 5, rect.bottom - 8), (rect.right - cut - 5, rect.bottom - 8), 2)
+            if h > 0:
+                scan_y = int(rect.top + (time.time() * scan_speed) % h)
+                if rect.top < scan_y < rect.bottom:
+                    pygame.draw.line(surf, (255, 255, 255, 100), (rect.left, scan_y), (rect.right, scan_y), 1)
+            
+            bracket_len = 10; bracket_col = (0,0,0,100)
+            pygame.draw.lines(surf, bracket_col, False, [(rect.left, rect.top + bracket_len), rect.topleft, (rect.left + bracket_len, rect.top)], 4)
+            pygame.draw.lines(surf, bracket_col, False, [(rect.right - bracket_len, rect.bottom), rect.bottomright, (rect.right, rect.bottom - bracket_len)], 4)
+            return rect
 
-        elif self.variant == 'soft':
+    def _draw_soft(self, surf, cx, cy, w, h, draw_color):
             rect = pygame.Rect(int(cx - w/2), int(cy - h/2), int(w), int(h))
             col = draw_color
             shadow_col = (200, 130, 140)
             if not self.pressed:
                 pygame.draw.rect(surf, shadow_col, rect.move(0, 6), border_radius=20)
             pygame.draw.rect(surf, col, rect.move(0, 3 if self.pressed else 0), border_radius=20)
+            return rect
 
-        elif self.variant == 'intro_orb':
-            r = int(w/2)
-            cx, cy = int(cx), int(cy)
-            mx, my = self.app.mouse_pos
-            
-            # Dynamic variables based on hover/press
-            rot_speed = self.orb_angle
-            pulse_speed = 15 if self.hover else 2
-            energy_level = 1.0 + (0.5 if self.hover else 0) + (1.0 if self.pressed else 0)
-            
-            # Parallax Core Offset
-            core_off_x = (mx - cx) * 0.1
-            core_off_y = (my - cy) * 0.1
-            
-            # 1. Ambient Particles (Orbiting) - Increased count and complexity
-            for i in range(8): 
-                orb_angle = rot_speed * 0.3 + i * (360/8)
-                dist = r + 15 + 5 * math.sin(time.time() * 5 + i) * energy_level
-                ox = cx + math.cos(math.radians(orb_angle)) * dist
-                oy = cy + math.sin(math.radians(orb_angle)) * dist
-                # Trail
-                for j in range(4):
-                    trail_alpha = 150 - j*35
-                    tx = cx + math.cos(math.radians(orb_angle - j*5)) * dist
-                    ty = cy + math.sin(math.radians(orb_angle - j*5)) * dist
-                    pygame.gfxdraw.filled_circle(surf, int(tx), int(ty), max(1, 4-j), (100, 220, 255, trail_alpha))
-                pygame.gfxdraw.filled_circle(surf, int(ox), int(oy), 4, (200, 255, 255))
-
-            # Outer Glow / Pulse
-            pulse = (math.sin(time.time() * pulse_speed) + 1) * 0.5 
-            glow_size = int(r + 30 + 20 * pulse * energy_level)
-            if self.pressed: glow_size = int(glow_size * 0.9)
-            
-            # Draw glow (using blit for better alpha blending with ADD)
-            s = pygame.Surface((glow_size*2, glow_size*2), pygame.SRCALPHA)
-            pygame.draw.circle(s, (20, 60, 150, 50), (glow_size, glow_size), glow_size)
-            pygame.draw.circle(s, (60, 120, 255, 80), (glow_size, glow_size), int(glow_size*0.7))
-            if self.pressed: pygame.draw.circle(s, (200, 230, 255, 100), (glow_size, glow_size), int(glow_size*0.4))
-            
-            # Extra energy streaks
-            if self.hover:
-                pygame.draw.circle(s, (100, 200, 255, 30), (glow_size, glow_size), int(glow_size * 1.2), 2)
-            surf.blit(s, (cx - glow_size, cy - glow_size), special_flags=pygame.BLEND_RGBA_ADD)
-            
-            # Rotating Rings
-            rect_ring = pygame.Rect(cx - r - 12, cy - r - 12, r*2 + 24, r*2 + 24)
-            pygame.draw.arc(surf, (100, 200, 255), rect_ring, math.radians(rot_speed), math.radians(rot_speed + 240), 3)
-            
-            rect_ring2 = pygame.Rect(cx - r - 6, cy - r - 6, r*2 + 12, r*2 + 12)
-            pygame.draw.arc(surf, (200, 230, 255), rect_ring2, math.radians(-rot_speed*1.5), math.radians(-rot_speed*1.5 + 120), 2)
-            
-            # Horizontal energy streak on hover
-            if self.hover:
-                 streak_w = r * 4 * energy_level
-                 streak_h = 2
-                 streak_surf = pygame.Surface((int(streak_w), streak_h), pygame.SRCALPHA)
-                 streak_surf.fill((200, 250, 255, 150))
-                 surf.blit(streak_surf, (cx - streak_w/2, cy - streak_h/2))
-
-            # Main Body
-            core_x, core_y = int(cx + core_off_x), int(cy + core_off_y)
-            
-            # Core jitter
-            if self.hover:
-                core_x += random.randint(-1, 1)
-                core_y += random.randint(-1, 1)
-
-            pygame.gfxdraw.filled_circle(surf, cx, cy, r, (230, 240, 255)) # Base
-            pygame.gfxdraw.filled_circle(surf, core_x, core_y, int(r*0.85), (180, 220, 255)) # Inner
-            pygame.gfxdraw.aacircle(surf, cx, cy, r, (255, 255, 255)) # Rim White
-            
-            # Play Icon
-            icon_col = (10, 20, 40)
-            if self.pressed:
-                pygame.gfxdraw.filled_circle(surf, core_x, core_y, r, (255, 255, 255))
-                icon_col = (100, 150, 255)
-            
-            # Centered Play Triangle
-            pts = [(core_x - 8, core_y - 14), (core_x - 8, core_y + 14), (core_x + 16, core_y)]
-            pygame.draw.polygon(surf, icon_col, pts)
-            
-            # Shine
-            pygame.gfxdraw.filled_circle(surf, int(core_x - r*0.3), int(core_y - r*0.3), int(r*0.3), (255,255,255,180))
-
-        elif self.variant == 'load_spinner':
+    def _draw_toggle(self, surf, cx, cy, w, h, draw_color):
             rect = pygame.Rect(int(cx - w/2), int(cy - h/2), int(w), int(h))
-            # Card BG
+            
+            # Animate knob position
+            target_knob_x = rect.right - rect.height/2 if self.toggled_on else rect.left + rect.height/2
+            if self.knob_x == 0: self.knob_x = target_knob_x # Initialize position
+            self.knob_x += (target_knob_x - self.knob_x) * 0.2
+
+            # Background
+            bg_col = ACCENT if self.toggled_on else (60, 70, 90)
+            pygame.draw.rect(surf, bg_col, rect, border_radius=int(h/2))
+            
+            # Knob
+            knob_r = int(h/2) - 6
+            knob_color = (255,255,255)
+            # Knob shadow
+            pygame.gfxdraw.filled_circle(surf, int(self.knob_x), int(cy), knob_r+2, (0,0,0,30))
+            pygame.gfxdraw.filled_circle(surf, int(self.knob_x), int(cy), knob_r, knob_color)
+            pygame.gfxdraw.aacircle(surf, int(self.knob_x), int(cy), knob_r, (200,200,200))
+            return rect
+
+    def _draw_morph(self, surf, cx, cy, w, h, draw_color):
+            # Interpolate width and border radius
+            eased_morph = self.morph_progress**2
+            
+            m_w = self.w + 60 * eased_morph
+            m_h = self.h
+            m_radius = int((m_h/2) * (1 - eased_morph) + 20 * eased_morph)
+            
+            rect = pygame.Rect(int(cx - m_w/2), int(cy - m_h/2), int(m_w), int(m_h))
+            
+            pygame.draw.rect(surf, (0,0,0,60), rect.move(0, 5), border_radius=m_radius)
+            pygame.draw.rect(surf, draw_color, rect, border_radius=m_radius)
+            pygame.draw.rect(surf, (255,255,255,25), rect.inflate(-8, -m_h*0.6), border_radius=m_radius)
+            return rect
+
+    def _draw_liquid(self, surf, cx, cy, w, h, draw_color):
+            # --- Bulge towards mouse ---
+            mx, my = self.app.mouse_pos
+            angle_to_mouse = math.atan2(my - cy, mx - cx)
+            pull = self.val_pull
+            
+            segments = 60
+            points = []
+            for i in range(segments):
+                ang = (i / segments) * math.pi * 2
+                
+                # Calculate how much this point should bulge
+                diff = abs((ang - angle_to_mouse + math.pi) % (2 * math.pi) - math.pi)
+                bulge_factor = max(0, 1 - diff / (math.pi / 1.5))**3 # Concentrated bulge
+                bulge_amount = pull * 25 * bulge_factor
+                
+                # Base ellipse shape
+                base_rx = w / 2
+                base_ry = h / 2
+                
+                px = cx + math.cos(ang) * (base_rx + bulge_amount)
+                py = cy + math.sin(ang) * (base_ry + bulge_amount)
+                points.append((px, py))
+
+            # Draw the bulging shape
+            if len(points) > 2:
+                pygame.gfxdraw.filled_polygon(surf, points, (*draw_color[:3], 60))
+
+            # Animated waves for distortion/highlight (drawn inside the shape)
+            rect = pygame.Rect(int(cx - w/2), int(cy - h/2), int(w), int(h))
+            for i in range(3):
+                amplitude = (h / (10 + i*4)) * (1 + self.val_pull * 1.5) # Agitate with proximity
+                frequency = 2 + i
+                speed = 1.5 + i * 0.5
+                y_offset = rect.top + h * 0.5 + (i - 1.5) * h * 0.1
+                
+                wave_points = []
+                for x_p in range(rect.left, rect.right + 1):
+                    y_p = y_offset + math.sin((x_p - rect.left) / w * frequency * 2 * math.pi + time.time() * speed + self.time_offset) * amplitude
+                    wave_points.append((x_p, y_p))
+                
+                if len(wave_points) > 1:
+                    pygame.draw.aalines(surf, (255, 255, 255, 40 + i*15), False, wave_points)
+
+            # Draw the border
+            if len(points) > 2:
+                pygame.gfxdraw.aapolygon(surf, points, (255, 255, 255, 120))
+            return rect
+
+    def _draw_intro_orb(self, surf, cx, cy, w, h, draw_color):
+            # Super clean liquid orb
+            cx, cy = int(cx), int(cy)
+            r = w / 2
+            
+            # Liquid distortion calculation
+            points = []
+            segments = 50
+            base_r = r
+            
+            # If expanding, it gets very wobbly
+            wobble_amp = 3.0
+            if self.app.intro_sequence:
+                wobble_amp = 10.0 + self.app.intro_timer * 2
+            elif self.hover:
+                wobble_amp = 5.0
+            
+            for i in range(segments):
+                ang = (i / segments) * math.pi * 2
+                # Superposition of sines for liquid feel
+                offset = math.sin(ang * 3 + time.time() * 4) * wobble_amp * 0.5
+                offset += math.cos(ang * 5 - time.time() * 2) * wobble_amp * 0.3
+                
+                rad = base_r + offset
+                px = cx + math.cos(ang) * rad
+                py = cy + math.sin(ang) * rad
+                points.append((px, py))
+            
+            # Draw
+            if len(points) > 2:
+                # Shadow
+                if not self.app.intro_sequence:
+                    pygame.draw.polygon(surf, (0,0,0,30), [(p[0], p[1]+10) for p in points])
+                
+                # Main Body (Gradient-ish via layering)
+                pygame.draw.polygon(surf, (200, 230, 255), points)
+                
+                # Inner darker liquid
+                inner_points = [(cx + (p[0]-cx)*0.8, cy + (p[1]-cy)*0.8) for p in points]
+                pygame.draw.polygon(surf, (180, 210, 250), inner_points)
+                
+                # Highlight (Gloss)
+                gloss_points = []
+                for i in range(10): # Top left arc
+                    idx = (i + int(segments*0.6)) % segments
+                    p = inner_points[idx]
+                    gloss_points.append(((p[0]+cx)/2, (p[1]+cy)/2))
+                if len(gloss_points) > 2:
+                     pygame.draw.lines(surf, (255, 255, 255, 200), False, gloss_points, 4)
+
+            # Icon
+            if not self.app.intro_sequence:
+                # Simple Play Triangle
+                pygame.draw.polygon(surf, (255, 255, 255), [(cx-5, cy-8), (cx-5, cy+8), (cx+10, cy)])
+            return pygame.Rect(cx-w/2, cy-h/2, w, h)
+
+    def _draw_shiny(self, surf, cx, cy, w, h, draw_color):
+        rect = pygame.Rect(int(cx - w/2), int(cy - h/2), int(w), int(h))
+        
+        # Base
+        pygame.draw.rect(surf, (40,40,45), rect, border_radius=12)
+        
+        # Metallic gradient
+        grad_surf = pygame.Surface((w, h), pygame.SRCALPHA)
+        for i in range(int(h)):
+            alpha = int(70 + (i/h) * 80)
+            pygame.draw.line(grad_surf, (255,255,255,alpha), (0, i), (w, i))
+        surf.blit(grad_surf, rect.topleft)
+        
+        # Sharp highlight
+        highlight_rect = pygame.Rect(rect.left, rect.top, rect.width, rect.height / 2)
+        highlight_surf = pygame.Surface(highlight_rect.size, pygame.SRCALPHA)
+        pygame.draw.rect(highlight_surf, (255,255,255,60), highlight_surf.get_rect(), border_top_left_radius=12, border_top_right_radius=12)
+        surf.blit(highlight_surf, highlight_rect.topleft)
+        
+        # Border
+        pygame.draw.rect(surf, (255,255,255,100), rect, 2, border_radius=12)
+        pygame.draw.rect(surf, (0,0,0,150), rect.inflate(2,2), 1, border_radius=13)
+        return rect
+
+    def _draw_holographic(self, surf, cx, cy, w, h, draw_color):
+        rect = pygame.Rect(int(cx - w/2), int(cy - h/2), int(w), int(h))
+        
+        # Base transparent shape
+        base_surf = pygame.Surface((w,h), pygame.SRCALPHA)
+        base_surf.fill((80, 150, 255, 20))
+        surf.blit(base_surf, rect.topleft)
+        
+        # Cycling color border
+        hue = (pygame.time.get_ticks() * 0.1) % 360
+        c = pygame.Color(0); c.hsva = (hue, 80, 100, 100)
+        pygame.draw.rect(surf, c, rect, 2, border_radius=8)
+        
+        # Glitchy scanlines
+        for i in range(int(h // 4)):
+            y = rect.top + i * 4
+            alpha = random.randint(10, 60)
+            start_x = rect.left + random.randint(-10, 10); end_x = rect.right + random.randint(-10, 10)
+            line_hue = (hue + random.randint(-20, 20)) % 360
+            line_c = pygame.Color(0); line_c.hsva = (line_hue, 70, 100, 100)
+            pygame.draw.line(surf, (*line_c[:3], alpha), (start_x, y), (end_x, y), 1)
+        return rect
+
+    def _draw_jelly(self, surf, cx, cy, w, h, draw_color):
+        r = int(min(w, h) / 2.2)
+        body_surf = pygame.Surface((r*2, r*2), pygame.SRCALPHA)
+        pygame.draw.circle(body_surf, (*draw_color[:3], 100), (r, r), r)
+        for i in range(3):
+            angle = time.time()*(2+i)+self.time_offset; dist = r*0.4*(math.sin(time.time()*(i+1))*0.5+0.5)
+            pygame.draw.circle(body_surf, (255,255,255,80), (r+math.cos(angle)*dist, r+math.sin(angle)*dist), r*0.15)
+        surf.blit(body_surf, (cx - r, cy - r))
+        pygame.gfxdraw.filled_circle(surf, int(cx - r*0.3), int(cy - r*0.3), int(r*0.25), (255,255,255,80))
+        pygame.gfxdraw.aacircle(surf, int(cx), int(cy), r, (255,255,255,120))
+        return pygame.Rect(cx-w/2, cy-h/2, w, h)
+
+    def _draw_ghost(self, surf, cx, cy, w, h, draw_color):
+        rect = pygame.Rect(int(cx - w/2), int(cy - h/2), int(w), int(h))
+        if self.hover or self.pressed:
+            pygame.draw.rect(surf, draw_color, rect, border_radius=8)
+        else:
+            pygame.draw.rect(surf, draw_color, rect, 2, border_radius=8)
+        return rect
+
+    def _draw_gradient(self, surf, cx, cy, w, h, draw_color):
+        rect = pygame.Rect(int(cx - w/2), int(cy - h/2), int(w), int(h))
+        
+        c1 = draw_color
+        c2 = tuple(min(255, c + 40) for c in self.color[:3]) # A brighter second color
+        if self.hover:
+            c1 = tuple(min(255, c + 20) for c in c1)
+            c2 = tuple(min(255, c + 20) for c in c2)
+
+        grad_surf = pygame.Surface((w, h))
+        for i in range(int(h)):
+            progress = i / h
+            r = c1[0] * (1 - progress) + c2[0] * progress
+            g = c1[1] * (1 - progress) + c2[1] * progress
+            b = c1[2] * (1 - progress) + c2[2] * progress
+            pygame.draw.line(grad_surf, (r, g, b), (0, i), (w, i))
+        
+        surf.blit(grad_surf, rect.topleft)
+        pygame.draw.rect(surf, (255,255,255,40), rect, 1, border_radius=10)
+        return rect
+
+    def _draw_link(self, surf, cx, cy, w, h, draw_color):
+        font = self.app.font_large if self.w > 160 else self.app.font_small
+        text_surf = font.render(self.text, True, draw_color)
+        text_rect = text_surf.get_rect(center=(cx, cy))
+        surf.blit(text_surf, text_rect)
+        if self.underline_progress > 0.01:
+            line_width = text_rect.width * self.underline_progress
+            line_y = text_rect.bottom + 2
+            pygame.draw.line(surf, draw_color, (text_rect.centerx - line_width/2, line_y), (text_rect.centerx + line_width/2, line_y), 2)
+        return text_rect
+
+    def _draw_flat(self, surf, cx, cy, w, h, draw_color):
+        rect = pygame.Rect(int(cx - w/2), int(cy - h/2), int(w), int(h))
+        col = draw_color
+        
+        if self.variant == 'secondary':
+            pygame.draw.rect(surf, col, rect, 2, border_radius=8)
+        else:
+            pygame.draw.rect(surf, col, rect, border_radius=8)
+            
+        # Hover effect
+        if self.hover and self.variant != 'secondary':
+            pygame.draw.rect(surf, (255,255,255,30), rect, border_radius=8)
+        return rect
+
+    def _draw_download(self, surf, cx, cy, w, h, draw_color):
+        rect = pygame.Rect(int(cx - w/2), int(cy - h/2), int(w), int(h))
+        
+        if self.download_state == 'idle':
+            pygame.draw.rect(surf, draw_color, rect, border_radius=12)
+        elif self.download_state == 'downloading':
+            pygame.draw.rect(surf, (40, 50, 60), rect, border_radius=12)
+            prog_w = w * self.download_progress
+            if prog_w > 0:
+                pygame.draw.rect(surf, draw_color, (rect.x, rect.y, prog_w, h), border_radius=12)
+        elif self.download_state == 'done':
+            pygame.draw.rect(surf, (16, 185, 129), rect, border_radius=12)
+            
+        return rect
+
+    def _draw_hold(self, surf, cx, cy, w, h, draw_color):
+        rect = pygame.Rect(int(cx - w/2), int(cy - h/2), int(w), int(h))
+        # Background
+        pygame.draw.rect(surf, (40, 50, 60), rect, border_radius=30)
+        # Fill
+        if self.hold_progress > 0:
+            fill_w = w * self.hold_progress
+            pygame.draw.rect(surf, self.app.accent_color, (rect.x, rect.y, fill_w, h), border_radius=30)
+        # Border
+        pygame.draw.rect(surf, (255,255,255,50), rect, 2, border_radius=30)
+        return rect
+
+    def _draw_slider(self, surf, cx, cy, w, h, draw_color):
+        track_rect = pygame.Rect(cx - w/2, cy - 4, w, 8)
+        pygame.draw.rect(surf, (40, 50, 60), track_rect, border_radius=4)
+        
+        fill_w = w * self.slider_val
+        pygame.draw.rect(surf, ACCENT, (track_rect.x, track_rect.y, fill_w, 8), border_radius=4)
+        
+        knob_x = track_rect.x + fill_w
+        pygame.draw.circle(surf, (255, 255, 255), (int(knob_x), int(cy)), 10)
+        return track_rect
+
+    def _draw_fab(self, surf, cx, cy, w, h, draw_color):
+        # Floating Action Button
+        r = int(min(w, h) / 2)
+        
+        # Shadow (offset based on hover)
+        shadow_off = 4 if self.hover else 2
+        shadow_radius = r + (2 if self.hover else 0)
+        pygame.gfxdraw.filled_circle(surf, int(cx), int(cy) + shadow_off, shadow_radius, (0,0,0,60))
+        
+        # Button Body
+        pygame.gfxdraw.filled_circle(surf, int(cx), int(cy), r, draw_color)
+        
+        # Plus Icon
+        icon_w = int(r * 0.8)
+        icon_thick = 3
+        # Horizontal
+        pygame.draw.rect(surf, (255,255,255), (cx - icon_w/2, cy - icon_thick/2, icon_w, icon_thick), border_radius=1)
+        # Vertical
+        pygame.draw.rect(surf, (255,255,255), (cx - icon_thick/2, cy - icon_w/2, icon_thick, icon_w), border_radius=1)
+        
+        # Highlight
+        pygame.gfxdraw.filled_circle(surf, int(cx - r*0.3), int(cy - r*0.3), int(r*0.2), (255,255,255,60))
+        
+        return pygame.Rect(cx-r, cy-r, r*2, r*2)
+
+    def _draw_menu(self, surf, cx, cy, w, h, draw_color):
+        rect = pygame.Rect(int(cx - w/2), int(cy - h/2), int(w), int(h))
+        # Transparent or colored background
+        if self.hover:
+            pygame.draw.rect(surf, (255,255,255,20), rect, border_radius=8)
+            
+        # Hamburger / Close Animation
+        t = self.toggle_progress
+        
+        line_w = w * 0.6
+        line_h = 3
+        spacing = 9
+        
+        # Center positions
+        c_x = cx
+        c_y = cy
+        
+        # Top Line
+        # Rotates 45deg (0.785 rad) and moves to center
+        angle_top = t * 0.785
+        y_top = (cy - spacing) * (1-t) + cy * t
+        
+        # Bottom Line
+        # Rotates -45deg and moves to center
+        angle_bot = t * -0.785
+        y_bot = (cy + spacing) * (1-t) + cy * t
+        
+        # Middle Line
+        # Fades out / scales down
+        mid_w = line_w * (1 - t)
+        
+        # Helper to draw rotated line
+        def draw_rot_line(surf, x, y, length, thickness, angle, color):
+            # Create surface for line, rotate it, blit
+            ls = pygame.Surface((length, thickness), pygame.SRCALPHA)
+            ls.fill(color)
+            ls = pygame.transform.rotate(ls, math.degrees(-angle))
+            r = ls.get_rect(center=(x, y))
+            surf.blit(ls, r)
+
+        col = (220, 230, 240)
+        
+        draw_rot_line(surf, c_x, y_top, line_w, line_h, angle_top, col)
+        if mid_w > 1:
+            pygame.draw.rect(surf, col, (c_x - mid_w/2, cy - line_h/2, mid_w, line_h), border_radius=1)
+        draw_rot_line(surf, c_x, y_bot, line_w, line_h, angle_bot, col)
+        
+        return rect
+
+    def _draw_social(self, surf, cx, cy, w, h, draw_color):
+        r = int(min(w, h) / 2)
+        pygame.gfxdraw.filled_circle(surf, int(cx), int(cy), r, draw_color)
+        
+        # Fake "f" or icon
+        font = self.app.font_large
+        txt = font.render(self.text[:1], True, (255,255,255))
+        surf.blit(txt, txt.get_rect(center=(cx, cy)))
+        return pygame.Rect(cx-r, cy-r, r*2, r*2)
+
+    def _draw_status(self, surf, cx, cy, w, h, draw_color):
+        rect = pygame.Rect(int(cx - w/2), int(cy - h/2), int(w), int(h))
+        pygame.draw.rect(surf, (40, 50, 60), rect, border_radius=8)
+        if self.hover:
+             pygame.draw.rect(surf, (255,255,255,20), rect, border_radius=8)
+        
+        # Dot
+        dot_col = (16, 185, 129) # Green
+        pygame.draw.circle(surf, dot_col, (int(rect.right - 20), int(cy)), 5)
+        # Glow
+        s = pygame.Surface((20, 20), pygame.SRCALPHA)
+        pygame.draw.circle(s, (*dot_col, 50), (10, 10), 8 + math.sin(time.time()*5)*2)
+        surf.blit(s, (rect.right - 30, cy - 10))
+        
+        return rect
+
+    def _draw_music(self, surf, cx, cy, w, h, draw_color):
+        rect = pygame.Rect(int(cx - w/2), int(cy - h/2), int(w), int(h))
+        
+        # Card Background
+        pygame.draw.rect(surf, (30, 35, 45), rect, border_radius=16)
+        if self.hover:
+            pygame.draw.rect(surf, (255, 255, 255, 10), rect, border_radius=16)
+            
+        # Visualizer Bars
+        bar_count = 16
+        margin = 20
+        total_bar_w = w - (margin * 2)
+        gap = 4
+        bar_w = (total_bar_w - (gap * (bar_count - 1))) / bar_count
+        
+        for i in range(bar_count):
+            if self.is_realtime_audio:
+                # Smoothly animate bar height
+                target_h = self.app.audio_levels[i] if self.music_playing else 0.05
+                self.music_bar_heights[i] += (target_h - self.music_bar_heights[i]) * 0.4
+                h_factor = self.music_bar_heights[i]
+            else:
+                # Fallback: Simulate audio spectrum
+                if self.music_playing:
+                    t = time.time() * 8 + i * 0.5
+                    # Combine sine waves for random-looking but smooth motion
+                    h_factor = (math.sin(t) * 0.5 + 0.5) * 0.7 + (math.sin(t * 2.3) * 0.3)
+                    h_factor = max(0.1, min(1.0, h_factor))
+                else:
+                    h_factor = 0.1
+                
+            bar_h = (h - 40) * h_factor
+            bx = rect.left + margin + i * (bar_w + gap)
+            by = rect.bottom - 20 - bar_h
+            
+            # Color gradient based on height
+            bar_col = tuple(min(255, int(c * 0.6 + (255-c)*h_factor*0.8)) for c in self.color)
+            pygame.draw.rect(surf, bar_col, (bx, by, bar_w, bar_h), border_radius=2)
+            
+        # Play/Pause Status Text
+        status_text = "PLAYING" if self.music_playing else "PAUSED"
+        font = self.app.font_small
+        txt = font.render(status_text, True, (150, 160, 180))
+        surf.blit(txt, txt.get_rect(topleft=(rect.left + 20, rect.top + 15)))
+        
+        # Icon (Play/Pause)
+        icon_x = rect.right - 30
+        icon_y = rect.top + 25
+        if self.music_playing:
+            # Pause icon
+            pygame.draw.rect(surf, (200, 200, 200), (icon_x - 6, icon_y - 6, 4, 12))
+            pygame.draw.rect(surf, (200, 200, 200), (icon_x + 2, icon_y - 6, 4, 12))
+        else:
+            # Play icon
+            pts = [(icon_x - 4, icon_y - 6), (icon_x - 4, icon_y + 6), (icon_x + 6, icon_y)]
+            pygame.draw.polygon(surf, (200, 200, 200), pts)
+            
+        return rect
+
+    def _draw_load_card(self, surf, cx, cy, w, h, draw_color):
+            rect = pygame.Rect(int(cx - w/2), int(cy - h/2), int(w), int(h))
             pygame.draw.rect(surf, (30, 35, 45), rect, border_radius=12)
             if self.hover: pygame.draw.rect(surf, (50, 60, 70), rect, 2, border_radius=12)
+            font = self.app.font_small
+            label_text = ""
             
             # Spinner
-            angle = time.time() * 300
-            radius = 20
-            rect_s = pygame.Rect(cx-radius, cy-radius-10, radius*2, radius*2)
-            pygame.draw.arc(surf, ACCENT, rect_s, math.radians(angle), math.radians(angle + 240), 4)
-            
-            # Label
-            font = self.app.font_small
-            txt = font.render("SPINNER", True, (150, 160, 180))
-            surf.blit(txt, txt.get_rect(center=(cx, cy + 25)))
-            return
+            if self.variant == 'load_spinner':
+                angle = time.time() * 300
+                radius = 20
+                rect_s = pygame.Rect(cx-radius, cy-radius-10, radius*2, radius*2)
+                pygame.draw.arc(surf, ACCENT, rect_s, math.radians(angle), math.radians(angle + 240), 4)
+                label_text = "SPINNER"
+            elif self.variant == 'load_bar':
+                bar_w, bar_h = 120, 8
+                bx = cx - bar_w / 2
+                by = cy - 10
+                pygame.draw.rect(surf, (50, 60, 70), (bx, by, bar_w, bar_h), border_radius=3)
+                progress = (math.sin(time.time() * 2) + 1) / 2
+                fill_w = bar_w * progress
+                pygame.draw.rect(surf, SECOND, (bx, by, fill_w, bar_h), border_radius=3)
+                label_text = "PROGRESS"
+            elif self.variant == 'load_dots':
+                for i in range(3):
+                    offset = math.sin(time.time() * 8 + i * 0.5) * 6
+                    dx = cx + (i - 1) * 20
+                    dy = cy - 10 + offset
+                    pygame.draw.circle(surf, [ACCENT, SECOND, TERTIARY][i], (int(dx), int(dy)), 6)
+                label_text = "BOUNCE"
+            elif self.variant == 'load_pulse':
+                for i in range(2):
+                    t = (time.time() * 1.0 + i * 1.0) % 2.0
+                    alpha = max(0, 255 * (1 - t/2.0))
+                    radius = 5 + t * 20
+                    s = pygame.Surface((int(radius*2), int(radius*2)), pygame.SRCALPHA)
+                    pygame.draw.circle(s, (*TERTIARY[:3], int(alpha)), (radius, radius), int(radius), 2)
+                    surf.blit(s, (cx - radius, cy - 10 - radius))
+                pygame.draw.circle(surf, TERTIARY, (int(cx), int(cy-10)), 5)
+                label_text = "PULSE"
 
-        elif self.variant == 'load_bar':
-            rect = pygame.Rect(int(cx - w/2), int(cy - h/2), int(w), int(h))
-            pygame.draw.rect(surf, (30, 35, 45), rect, border_radius=12)
-            if self.hover: pygame.draw.rect(surf, (50, 60, 70), rect, 2, border_radius=12)
-            
-            bar_w = 140
-            bar_h = 6
-            bx = cx - bar_w / 2
-            by = cy - 10
-            
-            # Track
-            pygame.draw.rect(surf, (50, 60, 70), (bx, by, bar_w, bar_h), border_radius=3)
-            # Fill
-            progress = (math.sin(time.time() * 2) + 1) / 2
-            fill_w = bar_w * progress
-            pygame.draw.rect(surf, SECOND, (bx, by, fill_w, bar_h), border_radius=3)
-            
-            # Label
-            font = self.app.font_small
-            txt = font.render("PROGRESS", True, (150, 160, 180))
-            surf.blit(txt, txt.get_rect(center=(cx, cy + 25)))
-            return
+            if label_text:
+                txt = font.render(label_text, True, (150, 160, 180))
+                surf.blit(txt, txt.get_rect(center=(cx, cy + 25)))
+            return rect
 
-        elif self.variant == 'load_dots':
-            rect = pygame.Rect(int(cx - w/2), int(cy - h/2), int(w), int(h))
-            pygame.draw.rect(surf, (30, 35, 45), rect, border_radius=12)
-            if self.hover: pygame.draw.rect(surf, (50, 60, 70), rect, 2, border_radius=12)
-            
-            for i in range(3):
-                offset = math.sin(time.time() * 8 + i * 0.5) * 6
-                dx = cx + (i - 1) * 20
-                dy = cy - 10 + offset
-                color = [ACCENT, SECOND, TERTIARY][i]
-                pygame.draw.circle(surf, color, (int(dx), int(dy)), 6)
-                
-            # Label
-            font = self.app.font_small
-            txt = font.render("BOUNCE", True, (150, 160, 180))
-            surf.blit(txt, txt.get_rect(center=(cx, cy + 25)))
-            return
-
-        elif self.variant == 'load_pulse':
-            rect = pygame.Rect(int(cx - w/2), int(cy - h/2), int(w), int(h))
-            pygame.draw.rect(surf, (30, 35, 45), rect, border_radius=12)
-            if self.hover: pygame.draw.rect(surf, (50, 60, 70), rect, 2, border_radius=12)
-            
-            for i in range(2):
-                t = (time.time() * 1.0 + i * 1.0) % 2.0
-                alpha = max(0, 255 * (1 - t/2.0))
-                radius = 5 + t * 20
-                s = pygame.Surface((int(radius*2), int(radius*2)), pygame.SRCALPHA)
-                pygame.draw.circle(s, (*TERTIARY[:3], int(alpha)), (int(radius), int(radius)), int(radius), 2)
-                surf.blit(s, (cx - radius, cy - 10 - radius))
-            
-            pygame.draw.circle(surf, TERTIARY, (int(cx), int(cy-10)), 5)
-
-            # Label
-            font = self.app.font_small
-            txt = font.render("PULSE", True, (150, 160, 180))
-            surf.blit(txt, txt.get_rect(center=(cx, cy + 25)))
-            return
-
-        else:
-            # STANDARD ROUNDED RECT (Pill/Box)
+    def _draw_standard(self, surf, cx, cy, w, h, draw_color):
             rect = pygame.Rect(int(cx - w/2), int(cy - h/2), int(w), int(h))
 
             # Firefly hover glow
@@ -677,24 +1228,32 @@ class Button:
             pygame.draw.rect(surf, draw_color, rect, border_radius=16)
             # Gloss
             pygame.draw.rect(surf, (255,255,255,20), rect.inflate(-4, -h/2).move(0, -h/4 + 2), border_radius=16)
+            return rect
 
-        # text
+    def _draw_text(self, surf, rect):
         font = self.app.font_large if self.w > 160 else self.app.font_small
         txt_col = TEXT
-        if self.variant == 'neumorphic': txt_col = (100, 100, 110)
-        if self.variant in ['retro', 'cyber']: txt_col = (20, 20, 20)
-        if self.variant == 'soft': txt_col = (255, 255, 255)
-        if self.variant == 'intro_orb': return # No text for intro orb
+        if self.variant == 'ghost' and not self.hover:
+            txt_col = self.color # Use button color for text when not hovered
+        elif self.variant == 'neumorphic': txt_col = (100, 100, 110)
+        elif self.variant in ['retro', 'cyber']: txt_col = (20, 20, 20)
+        elif self.variant == 'soft': txt_col = (255, 255, 255)
+        # Adaptive text color for solid buttons
+        elif self.variant in ['primary', 'danger', 'download', 'gradient', 'shatter', 'bubble', 'candy', 'ripple', 'pixel', 'firefly', 'glitch', 'jelly'] or \
+             (self.variant == 'ghost' and self.hover) or (self.variant == 'status') or \
+             (self.variant == 'soft'):
+            txt_col = get_text_color_for_bg(self.current_color)
         
         txt_shadow = font.render(self.text, True, (0,0,0, 50))
-        surf.blit(txt_shadow, txt_shadow.get_rect(center=(self.x, self.y + 2)))
+        surf.blit(txt_shadow, txt_shadow.get_rect(center=(rect.centerx, rect.centery + 2)))
 
         # Glitch text offset
+        tx_off = 0
         tx_off = 0
         if self.variant == 'glitch' and random.random() < self.val_pull * 0.3:
             tx_off = random.randint(-2, 2)
         txt = font.render(self.text, True, txt_col)
-        surf.blit(txt, txt.get_rect(center=(self.x, self.y)))
+        surf.blit(txt, txt.get_rect(center=(rect.centerx + tx_off, rect.centery + tx_off)))
 
         # counter
         if self.count > 0:
@@ -710,8 +1269,10 @@ class Button:
         if not self.hover:
             self.hover = True
             self.target_scale = 1.08
-            if self.variant in ['bubble', 'candy', 'jelly', 'slime']:
+            if self.variant in ['bubble', 'candy', 'slime']:
                 self.wobble = 0.1
+            if self.variant == 'jelly':
+                self.wobble = 0.25
             if self.app.sound_on:
                 self.app.play_hover()
 
@@ -721,16 +1282,25 @@ class Button:
 
     def on_down(self, mx, my):
         if self.anim_state != 'active': return
-        self.pressed = True
-        self.target_scale = 0.95
-        if self.variant in ['bubble', 'candy', 'slime']:
-            self.wobble = 0.2
-        if self.app.sound_on:
-            self.app.play_click(self.variant)
+        
+        # Only trigger press effects if not a slider (sliders handle their own logic)
+        if self.variant != 'slider':
+            self.pressed = True
+            self.target_scale = 0.95
+            if self.variant == 'soft':
+                self.target_scale = 0.9
+            if self.variant in ['bubble', 'candy', 'slime', 'jelly']:
+                self.wobble = 0.2
+            if self.app.sound_on:
+                self.app.play_click(self.variant)
 
     def on_up(self):
         if self.anim_state != 'active': return
         if self.pressed and self.hover:
+            if self.variant == 'toggle':
+                self.toggled_on = not self.toggled_on
+            if self.variant == 'menu':
+                self.toggled_on = not self.toggled_on
             if self.command:
                 self.command()
             else:
@@ -785,10 +1355,19 @@ class App:
         self.scroll_y = 0.0
         self.scroll_target = 0.0
         self.scroll_vel = 0.0
+        self.intro_sequence = False
+        self.intro_timer = 0
+        self.intro_solidify = False
+        self.solidify_progress = 0.0
+        self.code_scroll_y = 0.0
+        self.code_scroll_target = 0.0
+        self.audio_levels = None
+        self.audio_stream = None
+        self.audio_thread = None
 
         # fonts
-        self.font_large = pygame.font.SysFont('Segoe UI', 28, bold=True)
-        self.font_small = pygame.font.SysFont('Segoe UI', 14, bold=True)
+        self.font_large = pygame.font.SysFont('sans', 28, bold=True)
+        self.font_small = pygame.font.SysFont('sans', 14, bold=True)
 
         # UI state
         self.state = 'INTRO'
@@ -827,7 +1406,18 @@ class App:
             'glitch': self._effect_glitch,
             'neumorphic': self._effect_ripple, 'glass': self._effect_ripple, 'outline': self._effect_ripple,
             'retro': self._effect_ripple, 'cyber': self._effect_glitch, 'soft': self._effect_bubble,
-            'intro_orb': self._effect_intro
+            'intro_orb': self._effect_intro,
+            'liquid': self._effect_liquid,
+            'toggle': self._effect_toggle,
+            'morph': self._effect_morph,
+            'shiny': self._effect_shiny,
+            'holographic': self._effect_holographic,
+            'jelly': self._effect_jelly,
+            'ghost': self._effect_ripple,
+            'gradient': self._effect_gradient,
+            'link': self._effect_link,
+            'shatter': self._effect_shatter,
+            'music': self._effect_music,
         }
 
         # Dynamic UI Colors
@@ -844,9 +1434,13 @@ class App:
             self.bg_surf.blit(s, (self.W//2 - r, self.H//2 - r), special_flags=pygame.BLEND_RGBA_ADD)
         self.canvas = pygame.Surface((self.W, self.H))
         
+        # Start audio capture if possible
+        self.start_audio_capture()
+
     def trigger_intro(self):
-        self.next_state = 'BUTTONS'
-        self._effect_intro(self.intro_btn, 1.0)
+        self.intro_sequence = True
+        self.intro_timer = 0
+        self.intro_hit.play()
 
     def play_hover(self):
         try:
@@ -855,15 +1449,78 @@ class App:
 
     def play_click(self, variant):
         try:
-            freqs = {'bubble':700,'candy':880,'ripple':520,'pixel':220,'firefly':980,'glitch':100, 'neumorphic': 400, 'glass': 1200, 'retro': 300, 'cyber': 1000, 'soft': 200}
+            freqs = {'bubble':700,'candy':880,'ripple':520,'pixel':220,'firefly':980,'glitch':100, 'neumorphic': 400, 'glass': 1200, 'retro': 300, 'cyber': 1000, 'soft': 200, 'shiny': 1400, 'holographic': 1100, 'jelly': 300, 'ghost': 600, 'gradient': 800, 'link': 1200}
             f = freqs.get(variant, 520)
             s = make_tone(f, 0.16, 0.11)
             s.play()
         except: pass
 
+    def start_audio_capture(self):
+        if not SOUNDDEVICE_AVAILABLE or not NUMPY_AVAILABLE:
+            print("Info: sounddevice or numpy not found. Audio visualization will be simulated.")
+            print("Install with: pip install sounddevice numpy")
+            self.audio_levels = np.zeros(16) if NUMPY_AVAILABLE else [0]*16
+            return
+
+        self.audio_levels = np.zeros(16)
+        try:
+            # Find a loopback device
+            devices = sd.query_devices()
+            loopback_device_index = None
+            for i, device in enumerate(devices):
+                # Common loopback names
+                if 'loopback' in device['name'].lower() or 'stereo mix' in device['name'].lower():
+                    loopback_device_index = i
+                    break
+            
+            if loopback_device_index is None:
+                print("Warning: No loopback audio device found. Visualizer will not show system audio.")
+                print("You may need to enable 'Stereo Mix' on Windows or install a virtual audio device on macOS/Linux.")
+                return
+
+            self.audio_stream = sd.InputStream(
+                device=loopback_device_index,
+                channels=1,
+                samplerate=SAMPLE_RATE,
+                blocksize=2048,
+                callback=self._audio_callback
+            )
+            self.audio_stream.start()
+            print(f"Success: Audio stream started on device: {devices[loopback_device_index]['name']}")
+
+        except Exception as e:
+            print(f"Error starting audio stream: {e}")
+            self.audio_stream = None
+
+    def _audio_callback(self, indata, frames, time, status):
+        if status:
+            print(status, file=sys.stderr)
+        
+        # Use a window function for better FFT results
+        window = np.hanning(len(indata))
+        magnitude = np.abs(np.fft.rfft(indata[:, 0] * window))
+        
+        # Define frequency bands on a logarithmic scale
+        freq_bins = np.fft.rfftfreq(len(indata), 1./SAMPLE_RATE)
+        log_min, log_max = np.log10(20), np.log10(20000)
+        log_freq_cutoffs = np.logspace(log_min, log_max, len(self.audio_levels) + 1)
+
+        new_levels = []
+        for i in range(len(self.audio_levels)):
+            # Find which frequency bins fall into this visualizer bar
+            in_band = (freq_bins >= log_freq_cutoffs[i]) & (freq_bins < log_freq_cutoffs[i+1])
+            if np.any(in_band):
+                avg_mag = np.mean(magnitude[in_band])
+                # Scale logarithmically for better visual perception
+                level = np.log10(1 + avg_mag * 10) * 0.3
+                new_levels.append(min(1.0, level))
+            else:
+                new_levels.append(0)
+        self.audio_levels = new_levels
+
     def make_sidebar(self):
         self.sidebar_buttons = []
-        cats = ['BUTTONS', 'LOADING', 'TRANSITIONS', 'PARTICLES']
+        cats = ['ESSENTIALS', 'STYLES', 'COMPLEX', 'LOADING']
         for i, cat in enumerate(cats):
             btn = Button(self, 100, 100 + i*70, 160, 50, cat, variant='ui', command=lambda c=cat: self.set_category(c))
             btn.color = (40, 50, 70)
@@ -879,29 +1536,54 @@ class App:
         
         cx = (self.W - 260 - 400) // 2 + 260 # Center between sidebar and code panel
         
-        if category == 'BUTTONS':
+        if category == 'ESSENTIALS':
+            self.showcase_elements.append(Button(self, cx, 0, 300, 50, "STANDARD UI", variant='header'))
+            
+            self.showcase_elements.append(Button(self, cx, 0, 200, 50, "PRIMARY", variant='primary', command=lambda: self.show_code('primary')))
+            self.showcase_elements.append(Button(self, cx, 0, 200, 50, "SECONDARY", variant='secondary', command=lambda: self.show_code('secondary')))
+            self.showcase_elements.append(Button(self, cx, 0, 200, 50, "DANGER", variant='danger', command=lambda: self.show_code('danger')))
+            
+            self.showcase_elements.append(Button(self, cx, 0, 300, 50, "GHOST / LINK", variant='header'))
+            self.showcase_elements.append(Button(self, cx, 0, 180, 50, "TEXT LINK", variant='link', command=lambda: self.show_code('link')))
+
+            self.showcase_elements.append(Button(self, cx, 0, 300, 50, "ICONS & FAB", variant='header'))
+            self.showcase_elements.append(Button(self, cx, 0, 60, 60, "+", variant='fab', command=lambda: self.show_code('fab')))
+            self.showcase_elements.append(Button(self, cx, 0, 60, 60, "f", variant='social', command=lambda: self.show_code('social')))
+            self.showcase_elements.append(Button(self, cx, 0, 60, 60, "", variant='menu', command=lambda: self.show_code('menu')))
+
+        elif category == 'STYLES':
             groups = [
-                ("MODERN UI", ['neumorphic', 'glass', 'outline', 'soft']),
-                ("RETRO & TECH", ['retro', 'cyber', 'pixel', 'glitch']),
-                ("JUICY EFFECTS", ['bubble', 'candy', 'ripple', 'firefly']),
+                ("MODERN UI", ['neumorphic', 'glass', 'outline', 'soft', 'liquid', 'toggle', 'shiny', 'ghost', 'gradient']),
+                ("RETRO & TECH", ['retro', 'cyber', 'pixel', 'glitch', 'holographic']),
+                ("JUICY EFFECTS", ['bubble', 'candy', 'ripple', 'firefly', 'morph', 'jelly', 'shatter']),
             ]
             for title, variants in groups:
                 self.showcase_elements.append(Button(self, cx, 0, 300, 50, title, variant='header'))
                 for v in variants:
-                    btn = Button(self, cx, 0, 280, 80, v.upper(), variant=v, command=lambda v=v: self.show_code(v))
+                    if v == 'toggle':
+                        btn = Button(self, cx, 0, 100, 50, "", variant=v, command=lambda v=v: self.show_code(v))
+                    elif v == 'link':
+                        btn = Button(self, cx, 0, 180, 50, v.upper(), variant=v, command=lambda v=v: self.show_code(v))
+                    else:
+                        btn = Button(self, cx, 0, 280, 80, v.upper(), variant=v, command=lambda v=v: self.show_code(v))
                     self.showcase_elements.append(btn)
         
+        elif category == 'COMPLEX':
+            self.showcase_elements.append(Button(self, cx, 0, 300, 50, "INTERACTIVE", variant='header'))
+            self.showcase_elements.append(Button(self, cx, 0, 240, 60, "DOWNLOAD", variant='download', command=lambda: self.show_code('download')))
+            self.showcase_elements.append(Button(self, cx, 0, 240, 50, "STATUS CHECK", variant='status', command=lambda: self.show_code('status')))
+            self.showcase_elements.append(Button(self, cx, 0, 240, 60, "HOLD ME", variant='hold', command=lambda: self.show_code('hold')))
+            self.showcase_elements.append(Button(self, cx, 0, 280, 100, "MUSIC PLAYER", variant='music', command=lambda: self.show_code('music')))
+            self.showcase_elements.append(Button(self, cx, 0, 240, 50, "SLIDER", variant='slider', command=lambda: self.show_code('slider')))
+
         elif category == 'LOADING':
             variants = ['load_spinner', 'load_bar', 'load_dots', 'load_pulse']
             for i, v in enumerate(variants):
                 btn = Button(self, cx, 0, 280, 100, "", variant=v, command=lambda v=v: self.show_code(v))
                 self.showcase_elements.append(btn)
             
-        elif category == 'TRANSITIONS':
-            self.current_code_snippet = "# Transition effects coming soon..."
-            
-        elif category == 'PARTICLES':
-            self.current_code_snippet = "# Particle systems coming soon..."
+        else:
+            self.current_code_snippet = "# Coming soon..."
 
     def show_code(self, variant):
         # Example code snippets
@@ -978,6 +1660,101 @@ def draw_soft(surf, rect, pressed):
         pygame.draw.rect(surf, shadow, rect.move(0, 6), border_radius=20)
     pygame.draw.rect(surf, col, rect.move(0, 3 if pressed else 0), border_radius=20)
 """,
+            'toggle': """# UI Toggle Switch
+# This requires state management for the toggle.
+def draw_toggle(surf, rect, toggled_on, knob_x_anim):
+    # knob_x_anim should be a class member that is smoothly interpolated
+    # towards the target position in an update loop.
+    
+    target_knob_x = rect.right - rect.height/2 if toggled_on else rect.left + rect.height/2
+    knob_x_anim += (target_knob_x - knob_x_anim) * 0.2
+
+    # Background
+    bg_col = (110, 231, 183) if toggled_on else (60, 70, 90)
+    pygame.draw.rect(surf, bg_col, rect, border_radius=int(rect.height/2))
+    
+    # Knob
+    knob_r = int(rect.height/2) - 6
+    pygame.draw.circle(surf, (255,255,255), (int(knob_x_anim), rect.centery), knob_r)
+""",
+            'morph': """# Morphing Button
+# Changes shape on hover. Requires an animation value.
+def draw_morph_button(surf, rect, color, morph_progress):
+    # morph_progress is a value from 0.0 (default) to 1.0 (hovered)
+    # that should be animated smoothly in an update loop.
+    
+    eased_morph = morph_progress**2
+    m_w = rect.w + 60 * eased_morph
+    m_h = rect.h
+    m_radius = int((m_h/2) * (1 - eased_morph) + 20 * eased_morph)
+    
+    morph_rect = pygame.Rect(int(rect.centerx - m_w/2), int(rect.centery - m_h/2), int(m_w), int(m_h))
+    pygame.draw.rect(surf, color, morph_rect, border_radius=m_radius)
+""",
+            'liquid': """# Liquid Glass Button
+import math, time, pygame
+
+def draw_liquid(surf, rect, color, time_offset=0):
+    liquid_surf = pygame.Surface(rect.size, pygame.SRCALPHA)
+    pygame.draw.rect(liquid_surf, (*color[:3], 60), liquid_surf.get_rect(), border_radius=25)
+
+    # Animated waves for highlights
+    for i in range(3):
+        amp = rect.height / (10 + i*4)
+        freq = 2 + i
+        speed = 1.5 + i * 0.5
+        y_off = rect.height * 0.5 + (i - 1.5) * rect.height * 0.1
+        points = []
+        for x in range(rect.width + 1):
+            y = y_off + math.sin(x/rect.width*freq*2*math.pi + time.time()*speed + time_offset) * amp
+            points.append((x, y))
+        if len(points) > 1:
+            pygame.draw.aalines(liquid_surf, (255, 255, 255, 55), False, points)
+
+    surf.blit(liquid_surf, rect.topleft)
+    pygame.draw.rect(surf, (255, 255, 255, 120), rect, 2, border_radius=25)
+""",
+            'ghost': """# Ghost Button
+# Fills on hover.
+def draw_ghost(surf, rect, color, hover):
+    if hover:
+        pygame.draw.rect(surf, color, rect, border_radius=8)
+    else:
+        pygame.draw.rect(surf, color, rect, 2, border_radius=8)
+
+# Text color needs to be handled separately.
+# On hover, text is typically white/black.
+# Off hover, text is the button's color.
+""",
+            'gradient': """# Gradient Button
+def draw_gradient(surf, rect, color1, color2):
+    # Linearly interpolates from color1 at the top to color2 at the bottom.
+    
+    grad_surf = pygame.Surface(rect.size)
+    for i in range(rect.height):
+        progress = i / rect.height
+        # Linear interpolation for each color channel
+        r = color1[0] * (1 - progress) + color2[0] * progress
+        g = color1[1] * (1 - progress) + color2[1] * progress
+        b = color1[2] * (1 - progress) + color2[2] * progress
+        pygame.draw.line(grad_surf, (r, g, b), (0, i), (rect.width, i))
+    
+    surf.blit(grad_surf, rect.topleft)
+    pygame.draw.rect(surf, (255,255,255,40), rect, 1, border_radius=10)
+""",
+            'link': """# Link-style Button with Underline
+# This button has no body, only text and an animated underline.
+def draw_link(surf, text_rect, color, underline_progress):
+    # text_rect is the pygame.Rect of the rendered text.
+    # underline_progress is a float from 0.0 to 1.0 for animation.
+    
+    if underline_progress > 0.01:
+        line_width = text_rect.width * underline_progress
+        line_y = text_rect.bottom + 2
+        line_start = (text_rect.centerx - line_width / 2, line_y)
+        line_end = (text_rect.centerx + line_width / 2, line_y)
+        pygame.draw.line(surf, color, line_start, line_end, 2)
+""",
             'load_spinner': """# Simple Loading Spinner
 def draw_spinner(surf, center, color):
     angle = time.time() * 300
@@ -1017,6 +1794,115 @@ def draw_pulse(surf, center, color):
         s = pygame.Surface((int(radius*2), int(radius*2)), pygame.SRCALPHA)
         pygame.draw.circle(s, (*color[:3], int(alpha)), (int(radius), int(radius)), int(radius), 2)
         surf.blit(s, (center[0] - radius, center[1] - radius))
+""",
+            'primary': """# Standard Primary Button
+def draw_primary(surf, rect, color, hover):
+    # Simple rounded rect with hover effect
+    pygame.draw.rect(surf, color, rect, border_radius=8)
+    if hover:
+        pygame.draw.rect(surf, (255,255,255,30), rect, border_radius=8)
+""",
+            'download': """# Download Button with State
+# Requires state: 'idle', 'downloading', 'done' and progress (0.0-1.0)
+def draw_download(surf, rect, state, progress):
+    if state == 'idle':
+        pygame.draw.rect(surf, (110, 231, 183), rect, border_radius=12)
+        # Draw text "DOWNLOAD" here
+    elif state == 'downloading':
+        pygame.draw.rect(surf, (40, 50, 60), rect, border_radius=12)
+        fill_w = rect.width * progress
+        pygame.draw.rect(surf, (110, 231, 183), (rect.x, rect.y, fill_w, rect.height), border_radius=12)
+    elif state == 'done':
+        pygame.draw.rect(surf, (16, 185, 129), rect, border_radius=12)
+        # Draw text "DONE" here
+""",
+            'hold': """# Hold-to-Confirm Button
+# Requires tracking how long the mouse has been held down
+def draw_hold(surf, rect, hold_progress):
+    # Background
+    pygame.draw.rect(surf, (40, 50, 60), rect, border_radius=30)
+    
+    # Fill based on hold time
+    if hold_progress > 0:
+        fill_w = rect.width * hold_progress
+        pygame.draw.rect(surf, (110, 231, 183), (rect.x, rect.y, fill_w, rect.height), border_radius=30)
+        
+    pygame.draw.rect(surf, (255,255,255,50), rect, 2, border_radius=30)
+""",
+            'fab': """# Floating Action Button (FAB)
+def draw_fab(surf, cx, cy, radius, color, hover):
+    # Shadow
+    shadow_off = 4 if hover else 2
+    pygame.draw.circle(surf, (0,0,0,60), (cx, cy + shadow_off), radius + (2 if hover else 0))
+    
+    # Body
+    pygame.draw.circle(surf, color, (cx, cy), radius)
+    
+    # Icon (Plus)
+    w = int(radius * 0.8)
+    pygame.draw.rect(surf, (255,255,255), (cx - w/2, cy - 1, w, 2))
+    pygame.draw.rect(surf, (255,255,255), (cx - 1, cy - w/2, 2, w))
+""",
+            'menu': """# Animated Menu Icon (Hamburger to X)
+# Requires a progress value (0.0 to 1.0)
+def draw_menu_icon(surf, cx, cy, size, progress):
+    # Interpolate lines based on progress
+    # Top line rotates 45deg, Bottom -45deg, Middle fades
+    
+    angle = progress * 45
+    # ... rotation math ...
+    
+    # Draw lines
+    # ...
+""",
+            'status': """# Status Button
+def draw_status(surf, rect, text, status_color):
+    pygame.draw.rect(surf, (40, 50, 60), rect, border_radius=8)
+    
+    # Draw Text
+    # ...
+    
+    # Draw Status Dot
+    dot_pos = (rect.right - 20, rect.centery)
+    pygame.draw.circle(surf, status_color, dot_pos, 5)
+""",
+            'music': """# Music Visualizer Widget
+# Captures system audio using 'sounddevice' and 'numpy'.
+# Install with: pip install sounddevice numpy
+# Note: Requires a 'loopback' or 'Stereo Mix' audio device to be enabled.
+
+import sounddevice as sd
+import numpy as np
+
+def audio_callback(indata, frames, time, status):
+    # This function is called by the audio stream in a separate thread.
+    
+    # 1. Apply a window function to the audio data (indata)
+    windowed_data = indata[:, 0] * np.hanning(len(indata))
+    
+    # 2. Perform a Fast Fourier Transform (FFT)
+    fft_result = np.fft.rfft(windowed_data)
+    magnitudes = np.abs(fft_result)
+    
+    # 3. Process magnitudes into visualizer bar heights
+    # (grouping into frequency bands, logarithmic scaling, etc.)
+    # ... store results in a shared array for the UI thread to read.
+""",
+            'shatter': """# Shatter Effect
+# On click, the button shatters into particles.
+# This is handled by an effect function that
+# creates many triangular particles from the button's area
+# and temporarily hides the button via a cooldown.
+
+def effect_shatter(app, button):
+    button.shatter_cooldown = 120 # Frames to hide
+    
+    # Create particles
+    for _ in range(80):
+        # Create a triangular particle inside button bounds
+        # Give it an outward velocity and gravity
+        # ...
+        app.particles.append(new_particle)
 """,
             'bubble': """import pygame
 import random
@@ -1091,12 +1977,80 @@ class App:
 # pip install pygame"""
         }
         self.current_code_snippet = snippets.get(variant, snippets['default'])
+        self.code_scroll_y = 0.0
+        self.code_scroll_target = 0.0
 
     def copy_code(self):
         if PYPERCLIP_AVAILABLE and self.current_code_snippet:
             pyperclip.copy(self.current_code_snippet)
             # Optional: Add visual feedback
             self.flash_screen((100, 255, 100))
+
+    def draw_code_snippet(self, x_pos, alpha):
+        if not self.current_code_snippet:
+            return
+            
+        # Clip to code area to handle scrolling
+        code_rect = pygame.Rect(x_pos, 100, 400, self.H - 100)
+        old_clip = self.canvas.get_clip()
+        self.canvas.set_clip(code_rect)
+
+        start_y = 100 - self.code_scroll_y
+        line_height = 22
+        
+        try:
+            # Use a generic monospace font for better portability
+            code_font = pygame.font.SysFont('monospace', 14)
+        except:
+            code_font = self.font_small
+
+        lines = self.current_code_snippet.split('\n')
+        
+        # Calculate content height for scrolling limits
+        total_h = len(lines) * line_height + 40
+        max_scroll = max(0, total_h - code_rect.height)
+        if self.code_scroll_target > max_scroll: self.code_scroll_target = max_scroll
+
+        for i, line in enumerate(lines):
+            y_pos = start_y + i * line_height
+            
+            # Optimization: Skip off-screen lines
+            if y_pos < 100 - line_height or y_pos > self.H:
+                continue
+
+            # Line numbers
+            line_num = str(i + 1)
+            num_surf = code_font.render(line_num, True, (60, 70, 80))
+            if alpha < 255: num_surf.set_alpha(alpha)
+            self.canvas.blit(num_surf, (x_pos + 10, y_pos))
+
+            # Simple syntax highlighting
+            text_color = (210, 220, 230) # Default
+            if line.strip().startswith('#'):
+                text_color = (100, 160, 120) # Comment
+            elif line.strip().startswith(('def ', 'class ')):
+                text_color = SECOND # Keyword
+            elif 'import ' in line or 'from ' in line:
+                text_color = TERTIARY # Import
+            elif line.strip().startswith(('return', 'if ', 'else:', 'for ')):
+                text_color = (200, 150, 100) # Control flow
+
+            try:
+                txt_surf = code_font.render(line, True, text_color)
+                if alpha < 255:
+                    txt_surf.set_alpha(alpha)
+                self.canvas.blit(txt_surf, (x_pos + 45, y_pos))
+            except pygame.error:
+                pass
+
+        # Restore clip
+        self.canvas.set_clip(old_clip)
+        
+        # Scrollbar
+        if max_scroll > 0:
+            sb_h = max(30, (code_rect.height / total_h) * code_rect.height)
+            sb_y = 100 + (self.code_scroll_y / max_scroll) * (code_rect.height - sb_h - 10)
+            pygame.draw.rect(self.canvas, (60, 70, 80), (x_pos + 390, sb_y, 4, sb_h), border_radius=2)
 
     def flash_screen(self, color):
         self.flash = 12
@@ -1108,7 +2062,12 @@ class App:
             self.update()
             self.draw()
             pygame.display.flip()
-        pygame.quit(); sys.exit()
+        
+        if self.audio_stream:
+            self.audio_stream.stop()
+            self.audio_stream.close()
+        
+        pygame.quit()
 
     def trigger_button_effect(self, btn):
         # Update code view
@@ -1117,6 +2076,11 @@ class App:
         if btn.variant.startswith('custom_') or btn.variant == 'custom_preview':
             self._effect_custom(btn, 1.0)
             return
+            
+        if btn.variant == 'download' and btn.download_state == 'idle':
+            btn.download_state = 'downloading'
+            btn.download_progress = 0.0
+            btn.text = "LOADING..."
 
         # --- Call variant-specific handler ---
         handler = self.effect_handlers.get(btn.variant)
@@ -1129,6 +2093,97 @@ class App:
             vx = (random.random()*2-1)*2; vy = -random.random()*3-1 - 1
             self.particles.append(Particle(btn.x+random.uniform(-40,40), btn.y+random.uniform(-20,20), vx, vy, 60, random.uniform(6,12), (200,250,245), gravity=-0.05))
     
+    def _effect_toggle(self, btn, mult):
+        # Small poof of particles
+        side = 1 if btn.toggled_on else -1
+        for i in range(int(8 * mult)):
+            vx = side * random.uniform(1, 3)
+            vy = random.uniform(-2, 2)
+            x_start = btn.x + side * btn.w/2
+            self.particles.append(Particle(x_start, btn.y, vx, vy, 20, random.uniform(1, 4), (200,200,220), 'pixel', gravity=0.05))
+
+    def _effect_morph(self, btn, mult):
+        # Particles burst from corners
+        w, h = btn.w + 60, btn.h
+        for i in range(int(20 * mult)):
+            # Top-left, top-right, bottom-left, bottom-right
+            px = btn.x + (w/2 * random.choice([-1, 1]))
+            py = btn.y + (h/2 * random.choice([-1, 1]))
+            
+            vx = (px - btn.x) * 0.1 * random.uniform(0.5, 1.2)
+            vy = (py - btn.y) * 0.1 * random.uniform(0.5, 1.2)
+            
+            self.particles.append(Particle(px, py, vx, vy, 40, random.uniform(2, 6), btn.color, 'circle', gravity=0))
+    
+    def _effect_liquid(self, btn, mult):
+        for i in range(int(25 * mult)):
+            vx = random.uniform(-2, 2)
+            vy = random.uniform(-2, 2)
+            start_y = btn.y + random.uniform(-btn.h/4, btn.h/4)
+            p = Particle(btn.x, start_y, vx, vy, 
+                         random.randint(40, 70), # life
+                         random.uniform(4, 10), # size
+                         (200, 230, 255), 'circle', gravity=0.25)
+            self.particles.append(p)
+
+    def _effect_shiny(self, btn, mult):
+        for i in range(int(25 * mult)):
+            angle = random.uniform(0, 2 * math.pi)
+            speed = random.uniform(1, 6)
+            vx = math.cos(angle) * speed; vy = math.sin(angle) * speed
+            self.particles.append(Particle(btn.x, btn.y, vx, vy, random.randint(30, 60), random.uniform(1, 4), (220,220,255), 'sparkle', gravity=0.05))
+
+    def _effect_holographic(self, btn, mult):
+        self.glitch_frames = 4
+        for i in range(int(15 * mult)):
+            hue = (pygame.time.get_ticks() * 0.1 + random.randint(0, 50)) % 360
+            c = pygame.Color(0); c.hsva = (hue, 80, 100, 100)
+            self.particles.append(Particle(btn.x + random.uniform(-btn.w/2, btn.w/2), btn.y + random.uniform(-btn.h/2, btn.h/2), 
+                                 random.uniform(-4,4), random.uniform(-4,4), random.randint(20, 40), random.randint(4, 8), c, 'pixel'))
+
+    def _effect_jelly(self, btn, mult):
+        for i in range(int(15 * mult)):
+            vx = (random.random()*2-1)*3; vy = (random.random()*2-1)*3 - 1
+            color = (*btn.color[:3], 150)
+            self.particles.append(Particle(btn.x+random.uniform(-30,30), btn.y+random.uniform(-30,30), vx, vy, 50, random.uniform(8,15), color, 'circle', gravity=0.02))
+    
+    def _effect_gradient(self, btn, mult):
+        c1 = btn.color
+        c2 = tuple(min(255, c + 40) for c in btn.color[:3])
+        for i in range(int(20 * mult)):
+            angle = random.uniform(0, 2 * math.pi)
+            speed = random.uniform(2, 7)
+            vx = math.cos(angle) * speed
+            vy = math.sin(angle) * speed
+            color = c1 if random.random() > 0.5 else c2
+            self.particles.append(Particle(btn.x, btn.y, vx, vy, random.randint(30, 50), random.uniform(2, 5), color, 'pixel'))
+
+    def _effect_link(self, btn, mult):
+        pass
+    
+    def _effect_music(self, btn, mult):
+        btn.music_playing = not btn.music_playing
+        if btn.music_playing:
+            # Spawn music notes
+            for i in range(5):
+                note = random.choice(["♪", "♫", "♬"])
+                self.particles.append(TextParticle(btn.x + random.uniform(-40, 40), btn.y, note, (255, 100, 150), 60))
+
+    def _effect_shatter(self, btn, mult):
+        btn.shatter_cooldown = 120 # 2 seconds
+        
+        num_w, num_h = 10, 6
+        part_w, part_h = btn.w / num_w, btn.h / num_h
+        
+        for i in range(num_w):
+            for j in range(num_h):
+                px = (btn.x - btn.w/2) + (i + 0.5) * part_w
+                py = (btn.y - btn.h/2) + (j + 0.5) * part_h
+                
+                vx = (px - btn.x) * 0.05 + random.uniform(-1, 1)
+                vy = (py - btn.y) * 0.05 + random.uniform(-4, 2)
+                self.particles.append(Particle(px, py, vx, vy, random.randint(80, 120), part_w * random.uniform(0.8, 1.2), btn.color, 'triangle', gravity=0.2))
+
     def _effect_candy(self, btn, mult):
         # This effect is more complex, so the snippet is simplified.
         palette = self.candy_palettes[self.current_candy_palette]
@@ -1159,36 +2214,8 @@ class App:
         for i in range(int(8 * mult)): self.particles.append(Particle(btn.x, btn.y, random.uniform(-10,10), random.uniform(-10,10), 20, 8, random.choice([(255,0,0),(0,255,255),(255,255,255)]), 'pixel'))
 
     def _effect_intro(self, btn, mult):
-        self.shake = 60
-        self.flash = 60
-        self.intro_hit.play()
-        
-        cx, cy = btn.x, btn.y
-        
-        # Shockwave
-        self.particles.append(Particle(cx, cy, 0, 0, 120, 50, (200, 240, 255), 'ripple', gravity=0))
-        self.particles.append(Particle(cx, cy, 0, 0, 100, 100, (255, 255, 255), 'ripple', gravity=0))
-        
-        # High speed rays
-        for i in range(36):
-            angle = math.radians(i * 10)
-            vx = math.cos(angle) * 40
-            vy = math.sin(angle) * 40
-            self.particles.append(Particle(cx, cy, vx, vy, 40, 6, (200, 255, 255), 'line', gravity=0))
-
-        # Massive Explosion
-        for i in range(250):
-            speed = random.uniform(5, 30)
-            angle = random.uniform(0, 6.28)
-            p_type = random.choice(['sparkle', 'confetti', 'circle'])
-            col = random.choice([(200, 230, 255), (255, 255, 255), (100, 200, 255)])
-            self.particles.append(Particle(cx, cy, math.cos(angle)*speed, math.sin(angle)*speed, random.randint(60, 150), random.uniform(4, 12), col, p_type))
-            
-        # Slow heavy debris
-        for i in range(20):
-             speed = random.uniform(2, 8)
-             angle = random.uniform(0, 6.28)
-             self.particles.append(Particle(cx, cy, math.cos(angle)*speed, math.sin(angle)*speed, 100, random.uniform(10, 20), (255,255,255), 'circle', gravity=0.1))
+        # Replaced by intro_sequence logic in update
+        pass
 
     def _effect_custom(self, btn, mult):
         cfg = btn.custom_config
@@ -1228,7 +2255,11 @@ class App:
                     self.on_pointer_up(self.mouse_pos[0], self.mouse_pos[1])
                     self.drag_start = None
             elif ev.type == pygame.MOUSEWHEEL:
-                self.scroll_target -= ev.y * 120
+                if self.mouse_pos[0] > self.W - 400:
+                    self.code_scroll_target -= ev.y * 40
+                    self.code_scroll_target = max(0, self.code_scroll_target)
+                else:
+                    self.scroll_vel -= ev.y * 15
 
     def on_pointer_down(self, mx, my):
         current_buttons = self.get_current_buttons()
@@ -1277,6 +2308,57 @@ class App:
             if self.transition_alpha <= 0:
                 self.transition_fade_in = False
 
+        # Code scroll logic
+        self.code_scroll_y += (self.code_scroll_target - self.code_scroll_y) * 0.1
+
+        # Intro Sequence Logic
+        if self.intro_sequence:
+            self.intro_timer += 1
+            # Wobble and expand
+            self.intro_btn.liquid_distortion = self.intro_timer
+            
+            if self.intro_timer < 30:
+                # Anticipation (shrink slightly)
+                self.intro_btn.target_scale = 0.8
+            else:
+                # Expansion
+                self.intro_btn.target_scale = 1.0 + (self.intro_timer - 30) ** 3 * 0.001
+            
+            if self.intro_btn.scale > 25: # Covered screen
+                self.intro_sequence = False
+                self.intro_btn.scale = 1.0
+
+                # Start the solidification process
+                self.intro_solidify = True
+                self.solidify_progress = 0.0
+                
+                # Prepare the UI for drawing
+                self.state = 'BUTTONS'
+                if not self.sidebar_initialized:
+                     self.make_sidebar()
+                     self.set_category('STYLES')
+                     self.sidebar_initialized = True
+                
+                # Make all buttons invisible initially. They will be animated in.
+                for elem in self.sidebar_buttons + self.showcase_elements + [self.copy_code_button]:
+                    if elem: elem.visible = False
+
+        # Solidification sequence
+        if self.intro_solidify:
+            self.solidify_progress += 0.02 # Controls speed of solidification
+            if self.solidify_progress >= 1.0:
+                self.solidify_progress = 1.0
+                self.intro_solidify = False
+                
+                # Make UI buttons visible immediately
+                for btn in self.sidebar_buttons: btn.visible = True
+                self.copy_code_button.visible = True
+                # Animate in the showcase buttons
+                for i, elem in enumerate(self.showcase_elements):
+                    elem.visible = True
+                    elem.anim_state = 'entering'
+                    elem.anim_progress = -i * 0.1 # Staggered start
+
         # Update UI accent color
         if self.rainbow_cycle_timer > 0:
             self.rainbow_cycle_timer -= 1
@@ -1293,23 +2375,24 @@ class App:
 
         # Scroll logic
         if self.showcase_elements:
-            # Smooth scroll
-            self.scroll_y += (self.scroll_target - self.scroll_y) * 0.1
-            
-            # Snap to nearest button
-            if abs(self.scroll_target - self.scroll_y) < 1:
-                spacing = 110
-                snap_index = round(self.scroll_y / spacing)
-                snap_target = snap_index * spacing
-                # Only snap if we aren't actively scrolling
-                # For simplicity in this loop, we just drift towards snap
-                self.scroll_target += (snap_target - self.scroll_target) * 0.05
+            # Inertial scroll physics
+            self.scroll_target += self.scroll_vel
+            self.scroll_vel *= 0.85 # Damping
+            if abs(self.scroll_vel) < 0.1: self.scroll_vel = 0
 
-            # Update button positions
-            center_y = self.H / 2
-            for i, btn in enumerate(self.showcase_elements):
-                target_y = center_y + (i * 110) - self.scroll_y
-                btn.y = target_y
+            # Calculate content height for clamping
+            content_h = sum(btn.h + 20 for btn in self.showcase_elements) - 20
+            max_scroll = max(0, content_h - (self.H - 200)) # Visible area H - 100px top/bottom padding
+            self.scroll_target = max(0, min(self.scroll_target, max_scroll))
+
+            # Smoothly move scroll_y towards scroll_target
+            self.scroll_y += (self.scroll_target - self.scroll_y) * 0.1
+
+            # Dynamic Layout Calculation (Vertical Stack)
+            current_y = 100 - self.scroll_y
+            for btn in self.showcase_elements:
+                btn.y = current_y + btn.h / 2
+                current_y += btn.h + 20 # Advance Y-cursor by button height + padding
 
         current_buttons = self.get_current_buttons()
         for btn in current_buttons:
@@ -1325,12 +2408,10 @@ class App:
         # Update cursor trail
         self.particles.append(Particle(self.mouse_pos[0], self.mouse_pos[1], 0, 0, 10, 3, self.accent_color, gravity=0))
 
-        # update particles
-        for p in self.particles[:]:
-            p.update()
-            if p.life <= 0:
-                try: self.particles.remove(p)
-                except: pass
+        # update and filter particles
+        for p in self.particles:
+            p.update(self)
+        self.particles = [p for p in self.particles if p.life > 0]
 
         if self.shake > 0:
             self.shake *= 0.88
@@ -1352,54 +2433,60 @@ class App:
 
         current_buttons = self.get_current_buttons()
 
-        if self.state == 'INTRO':
+        # --- Panel and Background Drawing ---
+        if self.intro_solidify:
+            # 1. Draw solidifying background
+            prog = self.solidify_progress**2 # Ease-in
+            liquid_color = (200, 230, 255)
+            solid_color = tuple(int(l * (1 - prog) + b * prog) for l, b in zip(liquid_color, BG))
+            self.canvas.fill(solid_color)
+
+            # 2. Draw UI panels fading in
+            panel_alpha = int(255 * prog)
+            
+            # Sidebar
+            sidebar_surf = pygame.Surface((260, self.H), pygame.SRCALPHA)
+            sidebar_surf.fill((*DARK_PANEL, panel_alpha))
+            pygame.draw.line(sidebar_surf, (*(40, 50, 70), panel_alpha), (259, 0), (259, self.H), 1)
+            self.canvas.blit(sidebar_surf, (0, 0))
+
+            # Code Panel
+            code_x = self.W - 400
+            code_panel_surf = pygame.Surface((400, self.H), pygame.SRCALPHA)
+            code_panel_surf.fill((*(15, 18, 25), panel_alpha))
+            pygame.draw.line(code_panel_surf, (*(40, 50, 70), panel_alpha), (0, 0), (0, self.H), 1)
+            self.canvas.blit(code_panel_surf, (code_x, 0))
+            
+            # Code Snippet Text
+            self.draw_code_snippet(code_x, panel_alpha)
+
+        elif self.state == 'INTRO':
             # Intro Title
             t = self.font_large.render("SATISFYING UI", True, TEXT)
             self.canvas.blit(t, t.get_rect(center=(self.W//2, self.H//2 - 120)))
             t2 = self.font_small.render("CLICK TO START", True, (100, 120, 150))
             self.canvas.blit(t2, t2.get_rect(center=(self.W//2, self.H//2 + 100)))
-        else:
-            # Calculate transition offsets for panels
+        
+        elif self.state != 'INTRO': # Normal UI state with sliding transitions
             t_norm = self.transition_alpha / 255.0
-            if self.transition_fade_in:
-                 ease = 1 - (1 - t_norm)**3
-            else:
-                 ease = t_norm**3
+            ease = (1 - (1 - t_norm)**3) if self.transition_fade_in else t_norm**3
             
             sidebar_x = -260 * ease
             code_x_offset = 400 * ease
             
-            # Draw Sidebar
-            # Sidebar slides from left
             pygame.draw.rect(self.canvas, DARK_PANEL, (sidebar_x, 0, 260, self.H))
             pygame.draw.line(self.canvas, (40, 50, 70), (sidebar_x + 260, 0), (sidebar_x + 260, self.H), 1)
             
-            # Draw Code Panel
-            # Code panel slides from right
             code_x = self.W - 400 + code_x_offset
             pygame.draw.rect(self.canvas, (15, 18, 25), (int(code_x), 0, 400, self.H))
             pygame.draw.line(self.canvas, (40, 50, 70), (int(code_x), 0), (int(code_x), self.H), 1)
             
-            # Render Code Snippet
-            if self.current_code_snippet:
-                lines = self.current_code_snippet.split('\n')
-                y_off = 100
-                for line in lines:
-                    color = (150, 200, 255) if line.strip().startswith('def') else (200, 200, 200)
-                    if line.strip().startswith('#'): color = (100, 150, 100)
-                    t = self.font_small.render(line, True, color)
-                    self.canvas.blit(t, (int(code_x) + 20, y_off))
-                    y_off += 24
-            else:
-                # Default message if no code is shown
-                t = self.font_small.render("Click a button to see its code snippet.", True, (150, 160, 180))
-                rect = t.get_rect(center=(int(code_x) + 200, 150))
-                self.canvas.blit(t, rect)
-        
+            self.draw_code_snippet(int(code_x), 255)
+
         # Draw all buttons for the current state
         # Sort by size to ensure smaller buttons (nav) draw on top of larger ones if they overlap
         # This is a simple hack for z-ordering
-        for btn in sorted(current_buttons, key=lambda b: b.w * b.h * (b.wheel_scale if hasattr(b, 'wheel_scale') else 1), reverse=False):
+        for btn in sorted(current_buttons, key=lambda b: b.w * b.h, reverse=False):
             # Only draw if visible on screen (plus some margin)
             if -100 < btn.y < self.H + 100:
                 btn.draw(self.canvas)
@@ -1435,9 +2522,11 @@ class App:
         self.screen.blit(self.canvas, (ox, oy))
 
         # Draw screen transition overlay
-        if self.transition_alpha > 0:
+        if self.transition_alpha > 0 and not self.intro_solidify:
             transition_surf = pygame.Surface((self.W, self.H))
-            transition_surf.fill((0,0,0))
+            transition_color = (0,0,0)
+            # This is now only for category transitions, so it's always black
+            transition_surf.fill(transition_color)
             transition_surf.set_alpha(self.transition_alpha)
             self.screen.blit(transition_surf, (0,0))
 
