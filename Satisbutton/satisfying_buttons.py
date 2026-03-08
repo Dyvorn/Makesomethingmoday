@@ -1611,6 +1611,11 @@ class App:
             self.copy_code_button.command = None
         self.search_bar = Button(self, self.W//2, 50, 300, 40, "", variant='search_bar', command=lambda: None)
         self.intro_btn = Button(self, self.W//2, self.H//2, 120, 120, "", variant='intro_orb', command=self.trigger_intro)
+        
+        # Add theme toggle button to settings
+        theme_toggle_button = Button(self, 0, 0, 100, 50, "THEME", 'toggle', self.toggle_theme)
+        # This button is not added to any category by default, you might want to add it to the 'SETTINGS' category.
+
 
     def _init_effects(self):
         self.particles = []
@@ -2467,27 +2472,34 @@ class App:
         if self.glitch_frames > 0:
             self.glitch_frames -= 1
 
-    def _draw_panels(self, sidebar_x, code_x, alpha=255):
+    def _draw_panels(self, sidebar_x, code_x, alpha=255, panel_bg=None):
         """Helper to draw the sidebar and code panel with optional transparency."""
+        if panel_bg is None:
+            panel_bg = DARK_PANEL
+
+        sidebar_color = panel_bg
+        code_panel_color = (15, 18, 25) if sidebar_color == DARK_PANEL else (248, 249, 250)
+        line_color = (40, 50, 70) if sidebar_color == DARK_PANEL else (229, 231, 235)
+
         # Sidebar
         if alpha < 255:
             s = pygame.Surface((SIDEBAR_WIDTH, self.H), pygame.SRCALPHA)
-            s.fill((*DARK_PANEL, alpha))
-            pygame.draw.line(s, (*(40, 50, 70), alpha), (SIDEBAR_WIDTH - 1, 0), (SIDEBAR_WIDTH - 1, self.H), 1)
+            s.fill((*sidebar_color, alpha))
+            pygame.draw.line(s, (*line_color, alpha), (SIDEBAR_WIDTH - 1, 0), (SIDEBAR_WIDTH - 1, self.H), 1)
             self.canvas.blit(s, (sidebar_x, 0))
         else:
-            pygame.draw.rect(self.canvas, DARK_PANEL, (sidebar_x, 0, SIDEBAR_WIDTH, self.H))
-            pygame.draw.line(self.canvas, (40, 50, 70), (sidebar_x + SIDEBAR_WIDTH, 0), (sidebar_x + SIDEBAR_WIDTH, self.H), 1)
+            pygame.draw.rect(self.canvas, sidebar_color, (sidebar_x, 0, SIDEBAR_WIDTH, self.H))
+            pygame.draw.line(self.canvas, line_color, (sidebar_x + SIDEBAR_WIDTH - 1, 0), (sidebar_x + SIDEBAR_WIDTH - 1, self.H), 1)
 
         # Code Panel
         if alpha < 255:
             s = pygame.Surface((CODE_PANEL_WIDTH, self.H), pygame.SRCALPHA)
-            s.fill((*(15, 18, 25), alpha))
-            pygame.draw.line(s, (*(40, 50, 70), alpha), (0, 0), (0, self.H), 1)
+            s.fill((*code_panel_color, alpha))
+            pygame.draw.line(s, (*line_color, alpha), (0, 0), (0, self.H), 1)
             self.canvas.blit(s, (code_x, 0))
         else:
-            pygame.draw.rect(self.canvas, (15, 18, 25), (int(code_x), 0, CODE_PANEL_WIDTH, self.H))
-            pygame.draw.line(self.canvas, (40, 50, 70), (int(code_x), 0), (int(code_x), self.H), 1)
+            pygame.draw.rect(self.canvas, code_panel_color, (int(code_x), 0, CODE_PANEL_WIDTH, self.H))
+            pygame.draw.line(self.canvas, line_color, (int(code_x), 0), (int(code_x), self.H), 1)
             
         self.draw_code_snippet(int(code_x), alpha)
         
