@@ -280,9 +280,8 @@ PARTICLE_DRAW_HANDLERS = {
 
 def draw_header(btn, surf, rect, color):
     font = btn.app.font_small
-    txt = font.render(btn.text, True, (100, 110, 130))
-    surf.blit(txt, txt.get_rect(center=(rect.centerx, rect.centery + 10)))
-    pygame.draw.line(surf, (40, 50, 60), (rect.centerx - 120, rect.centery + 25), (rect.centerx + 120, rect.centery + 25), 1)
+    txt = font.render(btn.text, True, (140, 150, 170) if btn.app.theme == 'dark' else (100, 110, 130))
+    surf.blit(txt, txt.get_rect(center=rect.center))
     return rect
 
 def draw_circular(btn, surf, rect, color):
@@ -344,18 +343,27 @@ def draw_laser(btn, surf, rect, color):
     return rect
 
 def draw_ui(btn, surf, rect, color):
-    shadow_color = (*btn.app.accent_color[:3], 40) if btn.hover else (0,0,0,60)
-    shadow_offset = 2 if btn.hover else 4
-    pygame.draw.rect(surf, shadow_color, rect.move(0, shadow_offset), border_radius=8)
-    if btn.hover:
-        # Subtle gradient on hover
-        top_color = tuple(min(255, c+15) for c in color); bottom_color = tuple(max(0, c-15) for c in color)
-        pygame.draw.rect(surf, top_color, (rect.x, rect.y, rect.w, rect.h/2), border_top_left_radius=8, border_top_right_radius=8)
-        pygame.draw.rect(surf, bottom_color, (rect.x, rect.centery, rect.w, rect.h/2), border_bottom_left_radius=8, border_bottom_right_radius=8)
-    else:
-        pygame.draw.rect(surf, color, rect, border_radius=8)
-    if btn.hover:
+    is_active = (btn.text == btn.app.state)
+    
+    if is_active:
+        # Active style
+        bg_col = tuple(min(255, c + 15) for c in color)
+        pygame.draw.rect(surf, bg_col, rect, border_radius=8)
         pygame.draw.rect(surf, btn.app.accent_color, rect, 2, border_radius=8)
+        # Inner glow
+        s = pygame.Surface((rect.w, rect.h), pygame.SRCALPHA)
+        pygame.draw.rect(s, (*btn.app.accent_color[:3], 20), s.get_rect(), border_radius=8)
+        surf.blit(s, rect.topleft, special_flags=pygame.BLEND_RGBA_ADD)
+    else:
+        shadow_color = (*btn.app.accent_color[:3], 40) if btn.hover else (0,0,0,60)
+        shadow_offset = 2 if btn.hover else 4
+        pygame.draw.rect(surf, shadow_color, rect.move(0, shadow_offset), border_radius=8)
+        
+        if btn.hover:
+            pygame.draw.rect(surf, tuple(min(255, c+10) for c in color), rect, border_radius=8)
+            pygame.draw.rect(surf, btn.app.accent_color, rect, 2, border_radius=8)
+        else:
+            pygame.draw.rect(surf, color, rect, border_radius=8)
     _draw_shine_effect(surf, rect, btn.shine_progress, 8)
     return rect
 
@@ -660,8 +668,18 @@ def draw_flat(btn, surf, rect, color):
     if btn.variant == 'secondary':
         pygame.draw.rect(surf, color, body_rect, 2, border_radius=8)
     else:
+        # Enhanced Primary Button Styling
+        if btn.variant == 'primary':
+            # subtle gradient
+            c1 = color
+            c2 = tuple(max(0, c - 20) for c in color)
+            _draw_gradient_rect(surf, body_rect, c1, c2, border_radius=8)
+            # inner highlight (bevel)
+            pygame.draw.line(surf, (255, 255, 255, 100), (body_rect.left + 2, body_rect.top + 1), (body_rect.right - 2, body_rect.top + 1), 1)
+        else:
+            pygame.draw.rect(surf, color, body_rect, border_radius=8)
+            
         _draw_shine_effect(surf, body_rect, btn.shine_progress, 8)
-        pygame.draw.rect(surf, color, body_rect, border_radius=8)
     if btn.hover and btn.variant != 'secondary':
         pygame.draw.rect(surf, (255,255,255,30), body_rect, border_radius=8)
     return body_rect
@@ -685,6 +703,26 @@ def draw_hold(btn, surf, rect, color):
         pygame.draw.rect(surf, btn.app.accent_color, (rect.x, rect.y, rect.w * btn.hold_progress, rect.h), border_radius=30)
     pygame.draw.rect(surf, (255,255,255,50), rect, 2, border_radius=30)
     return rect
+
+def _draw_gradient_rect(surf, rect, c1, c2, border_radius=0):
+    """Helper to draw a vertical gradient rectangle."""
+    # Create a 1xH surface and scale it
+    h = max(1, int(rect.height))
+    grad = pygame.Surface((1, h), pygame.SRCALPHA)
+    for i in range(h):
+        p = i / h
+        color = [c1[j] * (1 - p) + c2[j] * p for j in range(3)]
+        grad.set_at((0, i), color)
+    
+    scaled_grad = pygame.transform.smoothscale(grad, (int(rect.width), int(rect.height)))
+    
+    # Draw onto a mask to handle border radius
+    mask = pygame.Surface((int(rect.width), int(rect.height)), pygame.SRCALPHA)
+    pygame.draw.rect(mask, (255, 255, 255), mask.get_rect(), border_radius=border_radius)
+    
+    # Blit gradient onto mask using MIN (keeps alpha of mask)
+    scaled_grad.blit(mask, (0, 0), special_flags=pygame.BLEND_RGBA_MIN)
+    surf.blit(scaled_grad, rect)
 
 def draw_slider(btn, surf, rect, color):
     track_rect = pygame.Rect(rect.centerx - rect.w/2, rect.centery - 4, rect.w, 8)
@@ -1613,9 +1651,8 @@ class App:
         self.intro_btn = Button(self, self.W//2, self.H//2, 120, 120, "", variant='intro_orb', command=self.trigger_intro)
         
         # Add theme toggle button to settings
-        theme_toggle_button = Button(self, 0, 0, 100, 50, "THEME", 'toggle', self.toggle_theme)
-        # This button is not added to any category by default, you might want to add it to the 'SETTINGS' category.
-
+        self.theme_toggle_button = Button(self, 0, 0, 100, 50, "THEME", 'toggle', self.toggle_theme)
+        self.theme_toggle_button.toggled_on = (self.theme == 'light')
 
     def _init_effects(self):
         self.particles = []
@@ -1868,6 +1905,8 @@ class App:
         elif category == 'SETTINGS':
             button_rows = [
                 [Button(self, 0, 0, 300, 50, "GLOBAL PHYSICS", 'header')],
+                [Button(self, 0, 0, 300, 50, "APPEARANCE", 'header')],
+                [self.theme_toggle_button]
             ]
             grav_slider = Button(self, cx, 0, 240, 50, "GRAVITY", 'slider', self.set_gravity)
             grav_slider.slider_val = 0.5
@@ -1940,6 +1979,7 @@ class App:
     def toggle_theme(self):
         self.theme = 'light' if self.theme == 'dark' else 'dark'
         self._create_bg_surface()
+        self.theme_toggle_button.toggled_on = (self.theme == 'light')
 
     def draw_code_snippet(self, x_pos, alpha):
         if not self.current_code_snippet:
@@ -2212,7 +2252,20 @@ class App:
             self.particles.append(Particle(btn.x, btn.y, random.uniform(-8,8), random.uniform(-8,-2), 50, random.uniform(5,10), btn.color, 'confetti'))
 
     def _effect_ripple(self, btn, mult):
-        self.particles.append(Particle(btn.x, btn.y, 0,0,60,6,(120,200,255),'ripple', gravity=0))
+        # Enhanced ripple effect for Primary button
+        count = 1 if btn.variant != 'primary' else 3
+        for i in range(count):
+            delay_size = 6 + i * 2
+            self.particles.append(Particle(btn.x, btn.y, 0, 0, 60, delay_size, (120, 200, 255), 'ripple', gravity=0))
+        
+        if btn.variant == 'primary':
+            self.shake = 2 # Add a little impact shake
+            # Add some sparkles
+            for i in range(int(8 * mult)):
+                angle = random.uniform(0, 6.28)
+                speed = random.uniform(2, 5)
+                vx, vy = math.cos(angle) * speed, math.sin(angle) * speed
+                self.particles.append(Particle(btn.x, btn.y, vx, vy, 30, random.uniform(1, 3), (255, 255, 255), 'sparkle', gravity=0.1))
 
     def _effect_pixel(self, btn, mult):
         for i in range(int(28 * mult)):
@@ -2490,6 +2543,15 @@ class App:
         else:
             pygame.draw.rect(self.canvas, sidebar_color, (sidebar_x, 0, SIDEBAR_WIDTH, self.H))
             pygame.draw.line(self.canvas, line_color, (sidebar_x + SIDEBAR_WIDTH - 1, 0), (sidebar_x + SIDEBAR_WIDTH - 1, self.H), 1)
+
+        # Sidebar Shadow
+        if alpha == 255:
+            shadow_w = 15
+            shadow_surf = pygame.Surface((shadow_w, self.H), pygame.SRCALPHA)
+            for x in range(shadow_w):
+                a = int(40 * (1 - x/shadow_w))
+                pygame.draw.line(shadow_surf, (0,0,0,a), (x, 0), (x, self.H))
+            self.canvas.blit(shadow_surf, (sidebar_x + SIDEBAR_WIDTH, 0))
 
         # Code Panel
         if alpha < 255:
