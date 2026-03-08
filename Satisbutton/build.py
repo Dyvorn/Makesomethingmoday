@@ -6,6 +6,12 @@ def build():
     """
     Builds the Satisfying Buttons application using PyInstaller.
     """
+    # Get the directory where this build script is located and change to it.
+    # This ensures that all relative paths are correct, regardless of where
+    # the script is called from.
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    os.chdir(script_dir)
+
     script_name = "satisfying_buttons.py"
     app_name = "Satisfying Buttons"
     

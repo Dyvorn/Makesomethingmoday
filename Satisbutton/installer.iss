@@ -3,14 +3,14 @@
 
 [Setup]
 AppName=Satisfying Buttons
-AppVersion=1.0
+AppVersion=1.1
 AppPublisher=Refined
 AppPublisherURL=https://buymeacoffee.com/refined
 AppSupportURL=https://www.youtube.com/channel/UCGe5VOk80siQe0r2OfQQWPw
 DefaultDirName={autopf}\Satisfying Buttons
 DefaultGroupName=Satisfying Buttons
 DisableProgramGroupPage=yes
-OutputBaseFilename=satisfying-buttons-setup-v1.0
+OutputBaseFilename=satisfying-buttons-setup-v1.1
 Compression=lzma
 SolidCompression=yes
 WizardStyle=modern

@@ -5,6 +5,7 @@ import struct
 import time
 import threading
 import warnings
+import urllib.request
 import webbrowser
 
 warnings.filterwarnings("ignore", category=UserWarning, message=".*pkg_resources.*")
@@ -37,6 +38,11 @@ from code_snippets import SNIPPETS
 # --- Config ---
 FPS = 60
 BG = (10, 16, 28)
+CURRENT_VERSION = "1.1"
+VERSION_URL = "https://raw.githubusercontent.com/REFINED-DEV/Satisfying-Buttons/main/version.txt"
+CHANGELOG_URL = "https://github.com/REFINED-DEV/Satisfying-Buttons/releases/latest"
+
+
 TEXT = (230, 240, 255)
 ACCENT = (110, 231, 183)
 SECOND = (96, 165, 250)
@@ -364,6 +370,11 @@ def draw_ui(btn, surf, rect, color):
             pygame.draw.rect(surf, btn.app.accent_color, rect, 2, border_radius=8)
         else:
             pygame.draw.rect(surf, color, rect, border_radius=8)
+
+    if btn.has_notification:
+        pygame.draw.circle(surf, (255, 80, 80), (rect.right - 12, rect.top + 12), 6)
+        pygame.draw.circle(surf, (255, 255, 255), (rect.right - 12, rect.top + 12), 6, 1)
+
     _draw_shine_effect(surf, rect, btn.shine_progress, 8)
     return rect
 
@@ -1115,6 +1126,7 @@ class Button:
         self.anim_state = 'active' # active, entering, exiting
         self.anim_progress = 0.0
         self.command = command
+        self.has_notification = False
         self.toggled_on = False
         self.morph_progress = 0.0
         self.knob_x = 0
@@ -1552,7 +1564,14 @@ class App:
         self._init_sounds()
         self._init_ui_state()
         self._init_effects()
-
+        
+        # --- Update Checker ---
+        self.update_available = False
+        self.update_checked = False
+        # Start update check in a non-blocking thread
+        update_thread = threading.Thread(target=self.check_for_updates, daemon=True)
+        update_thread.start()
+        
         # Start audio capture if possible
         self.start_audio_capture()
 
@@ -1670,6 +1689,7 @@ class App:
         self.intro_solidify = False
         self.solidify_progress = 0.0
         self.flash_surf = pygame.Surface((self.W, self.H), pygame.SRCALPHA)
+        self.blurred_bg = None
         self.gravity_multiplier = 1.0
 
         # Palettes for candy button
@@ -1715,6 +1735,41 @@ class App:
             'like': self._effect_like,
             'copy': self._effect_ripple,
         }
+
+    def create_blurred_background(self):
+        """Creates a blurred and darkened version of the background for the main UI."""
+        # This surface already has the base circles from the theme
+        temp_surf = self.bg_surf.copy()
+        
+        # Draw stars and aurora onto it to include them in the blur
+        if self.theme == 'dark':
+            scaled_aurora = pygame.transform.smoothscale(self.aurora_surf, (self.W, self.H))
+            temp_surf.blit(scaled_aurora, (0,0), special_flags=pygame.BLEND_RGBA_ADD)
+        for star in self.stars:
+            # Use the star's base position, not the parallax one
+            pygame.draw.rect(temp_surf, star.color, (star.x, star.y, star.size, star.size))
+
+        # The blur effect: scale down, then up
+        small_w, small_h = self.W // 24, self.H // 24
+        small_surf = pygame.transform.smoothscale(temp_surf, (small_w, small_h))
+        self.blurred_bg = pygame.transform.smoothscale(small_surf, (self.W, self.H))
+        
+        # Add a darkening layer to make buttons pop
+        darken_surf = pygame.Surface((self.W, self.H), pygame.SRCALPHA)
+        darken_surf.fill((0, 0, 0, 120))
+        self.blurred_bg.blit(darken_surf, (0,0))
+
+    def check_for_updates(self):
+        """Fetches the latest version number from a URL and compares it to the current version."""
+        try:
+            req = urllib.request.Request(VERSION_URL, headers={'User-Agent': 'SatisfyingButtons-App'})
+            with urllib.request.urlopen(req, timeout=5) as response:
+                latest_version = response.read().decode('utf-8').strip()
+            
+            if latest_version > CURRENT_VERSION:
+                self.update_available = True
+        except Exception as e:
+            print(f"Could not check for updates: {e}")
 
     def trigger_intro(self):
         self.intro_sequence = True
@@ -1823,7 +1878,17 @@ class App:
             btn.color = (40, 50, 70)
             self.sidebar_buttons.append(btn)
 
+    def open_update_url(self):
+        """Opens the changelog/download URL in the user's browser."""
+        webbrowser.open(CHANGELOG_URL)
+
     def set_category(self, category):
+        if category == 'SUPPORT':
+            for btn in self.sidebar_buttons:
+                if btn.text == 'SUPPORT':
+                    btn.has_notification = False
+                    break
+
         self.state = category
         self.showcase_elements = []
         self.active_element = None
@@ -1935,6 +2000,10 @@ class App:
                 [Button(self, 0, 0, 280, 80, "Buy Me a Coffee", 'bmac', lambda: webbrowser.open("https://buymeacoffee.com/refined"))],
                 [Button(self, 0, 0, 280, 80, "YouTube", 'youtube', lambda: webbrowser.open("https://www.youtube.com/channel/UCGe5VOk80siQe0r2OfQQWPw"))],
             ]
+            if self.update_available:
+                update_btn = Button(self, 0, 0, 280, 80, "UPDATE AVAILABLE!", 'gradient', self.open_update_url)
+                update_btn.color = (20, 150, 100)
+                button_rows.insert(1, [update_btn])
         else:
             self.current_code_snippet = "# Coming soon..."
 
@@ -1979,6 +2048,7 @@ class App:
     def toggle_theme(self):
         self.theme = 'light' if self.theme == 'dark' else 'dark'
         self._create_bg_surface()
+        self.create_blurred_background()
         self.theme_toggle_button.toggled_on = (self.theme == 'light')
 
     def draw_code_snippet(self, x_pos, alpha):
@@ -2419,6 +2489,7 @@ class App:
                 self.intro_solidify = False
                 
                 # Make UI buttons visible immediately
+                self.create_blurred_background()
                 for btn in self.sidebar_buttons: btn.visible = True
                 self.copy_code_button.visible = True
                 self.search_bar.visible = True
@@ -2470,6 +2541,12 @@ class App:
             # Smoothly move scroll_y towards scroll_target
             self.scroll_y += (self.scroll_target - self.scroll_y) * SCROLL_LERP_FACTOR
 
+            # This layout calculation was happening for all elements, but should only affect
+            # the scrollable content area. I'm moving it from the global list to here.
+            # This fixes the sidebar buttons trying to scroll.
+            # First, filter to only get the actual showcase buttons, not headers etc.
+            scrollable_buttons = [b for b in self.visible_showcase_elements if b.variant != 'header']
+
             # Dynamic Layout Calculation (Vertical Stack)
             current_y = SIDEBAR_Y_START - self.scroll_y
             for btn in self.visible_showcase_elements:
@@ -2512,6 +2589,13 @@ class App:
 
             # Draw the blurred circle for this point
             pygame.gfxdraw.filled_circle(self.aurora_surf, int(p['x']), int(p['y']), int(p['radius']), (*p['color'], 10))
+
+        if self.update_available and not self.update_checked:
+            self.update_checked = True
+            for btn in self.sidebar_buttons:
+                if btn.text == 'SUPPORT':
+                    btn.has_notification = True
+                    break
         
         for b in self.bokeh:
             b.update()
@@ -2567,16 +2651,18 @@ class App:
         
     def draw(self):
         # Use pre-rendered background on persistent canvas
-        self.canvas.blit(self.bg_surf, (0, 0))
-
-        if self.theme == 'dark':
-            # Draw Aurora
-            scaled_aurora = pygame.transform.smoothscale(self.aurora_surf, (self.W, self.H))
-            self.canvas.blit(scaled_aurora, (0,0), special_flags=pygame.BLEND_RGBA_ADD)
-            # Draw parallax stars
-        for star in self.stars:
-            pos = star.update(self.mouse_pos)
-            pygame.draw.rect(self.canvas, star.color, (pos[0], pos[1], star.size, star.size))
+        if self.state != 'INTRO' and not self.intro_solidify and self.blurred_bg:
+            self.canvas.blit(self.blurred_bg, (0,0))
+        else:
+            self.canvas.blit(self.bg_surf, (0, 0))
+            if self.theme == 'dark':
+                # Draw Aurora
+                scaled_aurora = pygame.transform.smoothscale(self.aurora_surf, (self.W, self.H))
+                self.canvas.blit(scaled_aurora, (0,0), special_flags=pygame.BLEND_RGBA_ADD)
+                # Draw parallax stars
+            for star in self.stars:
+                pos = star.update(self.mouse_pos)
+                pygame.draw.rect(self.canvas, star.color, (pos[0], pos[1], star.size, star.size))
             
         for b in self.bokeh:
             b.draw(self.canvas)
