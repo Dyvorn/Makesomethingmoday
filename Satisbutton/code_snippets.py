@@ -138,6 +138,66 @@ def draw_ghost(surf, rect, color, hover):
 # On hover, text is typically white/black.
 # Off hover, text is the button's color.
 """,
+    'checkbox': """# Checkbox
+# Requires a `toggled_on` state and `toggle_progress` (0.0-1.0) for animation.
+def draw_checkbox(surf, rect, color, progress):
+    # Box
+    pygame.draw.rect(surf, (80, 90, 110), rect, 2, border_radius=4)
+    
+    # Fill on progress
+    if progress > 0:
+        fill_rect = rect.inflate(-8, -8)
+        fill_rect.w *= progress
+        fill_rect.h *= progress
+        fill_rect.center = rect.center
+        pygame.draw.rect(surf, color, fill_rect, border_radius=2)
+
+    # Checkmark (draws in based on progress)
+    if progress > 0.5:
+        p1 = (rect.left + 4, rect.centery)
+        p2 = (rect.centerx - 2, rect.bottom - 4)
+        p3 = (rect.right - 4, rect.top + 4)
+        
+        # Interpolate points
+        t = (progress - 0.5) * 2
+        if t < 0.5:
+            p_mid = (p1[0] + (p2[0]-p1[0]) * t*2, p1[1] + (p2[1]-p1[1]) * t*2)
+            pygame.draw.line(surf, (255,255,255), p1, p_mid, 2)
+        else:
+            p_mid = (p2[0] + (p3[0]-p2[0]) * (t-0.5)*2, p2[1] + (p3[1]-p2[1]) * (t-0.5)*2)
+            pygame.draw.line(surf, (255,255,255), p1, p2, 2)
+            pygame.draw.line(surf, (255,255,255), p2, p_mid, 2)
+""",
+    'radio': """# Radio Button
+# Requires `toggled_on` state and `toggle_progress` (0.0-1.0) for animation.
+# Note: Group logic (deselecting others) is not included here.
+def draw_radio(surf, rect, color, progress):
+    cx, cy = rect.centerx, rect.centery
+    radius = rect.width // 2
+    
+    # Outer ring
+    pygame.draw.circle(surf, (80, 90, 110), (cx,cy), radius, 2)
+    
+    # Inner dot
+    if progress > 0:
+        inner_radius = (radius - 4) * progress
+        pygame.draw.circle(surf, color, (cx,cy), int(inner_radius))
+""",
+    'like': """# Like / Heart Button
+# Requires a `toggled_on` state.
+def draw_like_button(surf, rect, color, toggled_on):
+    # A simple heart shape polygon
+    r = rect.width / 2
+    cx, cy = rect.centerx, rect.centery - 2 # Shift up slightly
+    points = [
+        (cx, cy + r*0.8), (cx - r, cy - r*0.2), (cx - r*0.6, cy - r*0.8),
+        (cx, cy - r*0.4), (cx + r*0.6, cy - r*0.8), (cx + r, cy - r*0.2)
+    ]
+    if toggled_on:
+        pygame.draw.polygon(surf, color, points)
+    else:
+        pygame.draw.polygon(surf, (80, 90, 110), points, 2)
+""",
     'gradient': """# Gradient Button
 def draw_gradient(surf, rect, color1, color2):
     # Linearly interpolates from color1 at the top to color2 at the bottom.
@@ -315,6 +375,38 @@ def effect_shatter(app, button):
         # Give it an outward velocity and gravity
         # ...
         app.particles.append(new_particle)
+""",
+    'paint': """# Paint Mode
+# This toggles a global 'paint_mode' in the app.
+# When active, clicking and dragging on the background
+# creates colorful, fading trails.
+
+class App:
+    def __init__(self):
+        # ...
+        self.paint_mode = False
+        self.paint_trails = []
+        self.current_paint_trail = None
+
+    def toggle_paint_mode(self):
+        self.paint_mode = not self.paint_mode
+
+    def handle_events(self):
+        # ... in event loop ...
+        if ev.type == pygame.MOUSEBUTTONDOWN and not on_a_button:
+            if self.paint_mode:
+                self.current_paint_trail = {'points': [], 'color': random_color()}
+                self.paint_trails.append(self.current_paint_trail)
+        elif ev.type == pygame.MOUSEBUTTONUP:
+            self.current_paint_trail = None
+        elif ev.type == pygame.MOUSEMOTION and self.current_paint_trail is not None:
+            self.current_paint_trail['points'].append({'pos': ev.pos, 'life': 150})
+    
+    def update(self):
+        # In update, iterate through trails and points, decrementing 'life'.
+    def draw(self):
+        # In draw, iterate through trails and draw circles for each point,
+        # using 'life' to control size and alpha for a fading effect.
 """,
     'bubble': """import pygame
 import random
