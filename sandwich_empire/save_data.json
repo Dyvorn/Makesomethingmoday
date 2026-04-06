@@ -1,0 +1,17 @@
+{
+    "1": {
+        "name": "3232",
+        "day": 1,
+        "money": 100,
+        "rank": "Dishwasher",
+        "difficulty": "EASY"
+    },
+    "2": {
+        "name": "324124",
+        "day": 1,
+        "money": 100,
+        "rank": "Dishwasher",
+        "difficulty": "EASY"
+    },
+    "3": null
+}
