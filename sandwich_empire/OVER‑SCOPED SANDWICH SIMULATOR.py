@@ -3,6 +3,7 @@ import os
 import random
 import math
 import json
+from pathlib import Path
 from PyQt6.QtCore import Qt, QRect, QPropertyAnimation, QEasingCurve, pyqtProperty, QPoint, QTimer, QUrl
 from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PyQt6.QtGui import QPainter, QColor, QBrush, QPen, QFont, QLinearGradient
@@ -19,40 +20,75 @@ from PyQt6.QtWidgets import (
     QSlider,
 )
 
+# --- Configuration & Constants ---
+BASE_DIR = Path(__file__).parent
+SAVE_FILE = BASE_DIR / "save_data.json"
+MUSIC_FILE = BASE_DIR / "background_music.mp3"
+
+COLORS = {
+    "primary": "#ffca28",
+    "primary_hover": "#ffd54f",
+    "primary_border": "#ffa000",
+    "accent": "#f06292",
+    "text_dark": "#5d4037",
+    "sky_top": "#81d4fa",
+    "sky_bottom": "#29b6f6",
+    "cloud": "#ffffff",
+    "cloud_outline": "#bbdefb"
+}
+
+GAME_COLORS = {
+    "bread": "#d7ccc8",
+    "lettuce": "#8bc34a",
+    "tomato": "#ef5350",
+    "cheese": "#ffeb3b"
+}
+
+class Screen:
+    MAIN_MENU = 0
+    SAVE_SLOTS = 1
+    GAME = 2
 
 class JuicyButton(QPushButton):
-    """A button that bounces and scales when hovered for maximum 'juice'."""
     def __init__(self, text):
         super().__init__(text)
         self._scale = 1.0
+        self._selected = False
         self.setMinimumHeight(80)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setStyleSheet(
-            """
-            QPushButton {
-                background-color: #ffca28;
-                color: #5d4037;
+        self.refresh_style()
+
+        self.anim = QPropertyAnimation(self, b"scale_prop")
+        self.anim.setDuration(150)
+        
+        self.press_anim = QPropertyAnimation(self, b"scale_prop")
+        self.press_anim.setDuration(50)
+        self.press_anim.setEasingCurve(QEasingCurve.Type.OutQuad)
+
+    def refresh_style(self):
+        border_col = "#ffffff" if self._selected else COLORS["primary_border"]
+        bg_col = COLORS["primary_hover"] if self._selected else COLORS["primary"]
+        
+        self.setStyleSheet(f"""
+            JuicyButton {{
+                background-color: {bg_col};
+                color: {COLORS["text_dark"]};
                 border-radius: 30px;
                 font-size: 24px;
                 font-weight: bold;
                 padding: 8px;
-                border: 4px solid #ffa000;
+                border: 4px solid {border_col};
                 margin: 5px;
-            }
-            QPushButton:hover {
-                background-color: #ffd54f;
+            }}
+            JuicyButton:hover {{
+                background-color: {COLORS["primary_hover"]};
                 border: 4px solid #ffffff;
-            }
-            QPushButton:pressed {
-                background-color: #ffb300;
+            }}
+            JuicyButton:pressed {{
+                background-color: {COLORS["primary_border"]};
                 border: 4px solid #3e2723;
-            }
-            """
-        )
-
-        self.anim = QPropertyAnimation(self, b"scale_prop")
-        self.anim.setDuration(150)
-        self.anim.setEasingCurve(QEasingCurve.Type.OutBack)
+            }}
+        """)
 
     @pyqtProperty(float)
     def scale_prop(self):
@@ -62,6 +98,15 @@ class JuicyButton(QPushButton):
     def scale_prop(self, value):
         self._scale = value
         self.update()
+
+    @pyqtProperty(bool)
+    def selected(self):
+        return self._selected
+
+    @selected.setter
+    def selected(self, value):
+        self._selected = value
+        self.refresh_style()
 
     def enterEvent(self, event):
         self.anim.stop()
@@ -75,10 +120,19 @@ class JuicyButton(QPushButton):
         self.anim.start()
         super().leaveEvent(event)
 
+    def mousePressEvent(self, event):
+        self.press_anim.setEndValue(0.95)
+        self.press_anim.start()
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self.press_anim.setEndValue(1.1 if self.underMouse() else 1.0)
+        self.press_anim.start()
+        super().mouseReleaseEvent(event)
+
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        # Apply scale transformation around the center
         painter.translate(self.width() / 2, self.height() / 2)
         painter.scale(self._scale, self._scale)
         painter.translate(-self.width() / 2, -self.height() / 2)
@@ -90,7 +144,6 @@ class CloudTitle(QWidget):
         super().__init__()
         self._text = text
         self._y_offset = 0
-        self.setMinimumWidth(900)  # Ensure the widget doesn't collapse
         self.setFixedHeight(140)
 
     @pyqtProperty(int)
@@ -106,26 +159,24 @@ class CloudTitle(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         
-        # Draw the "Cloud" shape
         painter.translate(0, self._y_offset)
-        painter.setPen(QPen(QColor("#bbdefb"), 4))
-        painter.setBrush(QBrush(QColor("#ffffff")))
+        painter.setPen(QPen(QColor(COLORS["cloud_outline"]), 4))
+        painter.setBrush(QBrush(QColor(COLORS["cloud"])))
         
-        # Draw a "Bubbly" cloud that scales with width
-        r = self.rect().adjusted(30, 20, -30, -20)
+        # Dynamic Cloud geometry based on widget width
+        w, h = self.width(), self.height()
+        mid_x = w // 2
+        
         # Left clusters
-        painter.drawEllipse(r.x() - 10, r.y() + 20, 90, 90)
-        painter.drawEllipse(r.x() + 40, r.y() - 10, 120, 120)
+        painter.drawEllipse(mid_x - 420, 40, 90, 90)
+        painter.drawEllipse(mid_x - 370, 10, 120, 120)
         # Right clusters
-        painter.drawEllipse(r.right() - 80, r.y() + 20, 90, 90)
-        painter.drawEllipse(r.right() - 160, r.y() - 10, 120, 120)
+        painter.drawEllipse(mid_x + 330, 40, 90, 90)
+        painter.drawEllipse(mid_x + 250, 10, 120, 120)
         # Top filler
-        painter.drawEllipse(r.center().x() - 100, r.y() - 20, 200, 100)
-
-        # Main body rect to bridge the bubbles
-        painter.drawRoundedRect(r.x() + 40, r.y() + 20, r.width() - 80, 70, 35, 35)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.drawRect(r.x() + 50, r.y() + 30, r.width() - 100, 60)
+        painter.drawEllipse(mid_x - 100, 0, 200, 100)
+        # Main Body
+        painter.drawRoundedRect(mid_x - 350, 40, 700, 70, 35, 35)
 
         # Draw the Text manually so it stays locked to the cloud movement
         font = QFont("Segoe UI", 36)
@@ -136,7 +187,6 @@ class CloudTitle(QWidget):
         painter.setPen(QColor(0, 0, 0, 30))
         painter.drawText(self.rect().translated(3, 3), Qt.AlignmentFlag.AlignCenter, self._text)
         
-        # Title Text
         painter.setPen(QColor("#3949ab"))
         painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self._text)
 
@@ -154,13 +204,10 @@ class MainMenu(QWidget):
         main_layout = QVBoxLayout()
         main_layout.addStretch(2)
 
-        # Center container (so cloud can bounce in the middle)
         cloud_container = QHBoxLayout()
-        cloud_container.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-
         self.cloud_title = CloudTitle("🥪 OVER‑SCOPED SANDWICH SIMULATOR 🥪")
+        self.cloud_title.setMinimumWidth(900)
         cloud_container.addWidget(self.cloud_title)
-
         main_layout.addLayout(cloud_container)
         main_layout.addSpacing(10)
 
@@ -186,9 +233,9 @@ class MainMenu(QWidget):
         self.volume_slider.setRange(0, 100)
         self.volume_slider.setValue(50)
         self.volume_slider.setStyleSheet("""
-            QSlider::groove:horizontal { height: 12px; background: #ffa000; border-radius: 6px; }
-            QSlider::handle:horizontal { background: #f06292; border: 3px solid white; width: 24px; margin: -6px 0; border-radius: 12px; }
-        """)
+            QSlider::groove:horizontal { height: 12px; background: %s; border-radius: 6px; }
+            QSlider::handle:horizontal { background: %s; border: 3px solid white; width: 24px; margin: -6px 0; border-radius: 12px; }
+        """ % (COLORS["primary_border"], COLORS["accent"]))
         if self.audio_output:
             self.volume_slider.valueChanged.connect(lambda v: self.audio_output.setVolume(v / 100.0))
         
@@ -208,10 +255,8 @@ class MainMenu(QWidget):
         button_layout.setSpacing(20)
 
         play_button = JuicyButton("▶ START GAME")
-
         play_button.clicked.connect(self.on_play)
-        # Removed shop_button, story_button, quit_button as per request
-
+        
         button_layout.addWidget(play_button)
 
         main_layout.addLayout(button_layout)
@@ -233,28 +278,27 @@ class MainMenu(QWidget):
     # Button slots – we’ll wire these to the game later
     def on_play(self):
         if self.switch_callback:
-            self.switch_callback(1) # Switch to SaveSlotMenu (index 1)
+            self.switch_callback(Screen.SAVE_SLOTS)
 
 
 
 class SaveSlotMenu(QWidget):
     def __init__(self, switch_callback=None):
         super().__init__()
-        self.script_dir = os.path.dirname(os.path.abspath(__file__))
-        self.save_path = os.path.join(self.script_dir, "save_data.json")
         self.switch_callback = switch_callback
         self.selected_slot = None
         self.selected_diff = "NORMAL"
         self.save_slots = self.load_saves()
-        self.slot_buttons = []
+        self.slot_buttons = {} # Map slot_id -> button
         self.diff_buttons = {}
         self.init_ui()
+        self.update_slot_visuals()
 
     def load_saves(self):
         """Loads save data from JSON file or returns empty slots."""
-        if os.path.exists(self.save_path):
+        if SAVE_FILE.exists():
             try:
-                with open(self.save_path, 'r') as f:
+                with open(SAVE_FILE, 'r') as f:
                     data = json.load(f)
                     return {int(k): v for k, v in data.items()}
             except Exception as e:
@@ -264,10 +308,17 @@ class SaveSlotMenu(QWidget):
     def save_to_file(self):
         """Saves current slots to JSON file."""
         try:
-            with open(self.save_path, 'w') as f:
+            with open(SAVE_FILE, 'w') as f:
                 json.dump(self.save_slots, f, indent=4)
         except Exception as e:
             print(f"Error saving to file: {e}")
+
+    def get_slot_text(self, slot_id):
+        """Generates text based on current save data."""
+        data = self.save_slots.get(slot_id)
+        if data:
+            return f"SLOT {slot_id}\n{data['name'].upper()}\nDay {data['day']} | ${data['money']}\nRank: {data['rank']}"
+        return f"SLOT {slot_id}\n(EMPTY)"
 
     def init_ui(self):
         layout = QVBoxLayout()
@@ -283,23 +334,11 @@ class SaveSlotMenu(QWidget):
         # Slots Row
         slot_layout = QHBoxLayout()
         slot_layout.setContentsMargins(100, 0, 100, 0)
-        self.slot_buttons = []
         for i in range(1, 4):
-            data = self.save_slots.get(i)
-            if data:
-                slot_text = f"SLOT {i}\n{data['name'].upper()}\nDay {data['day']} | ${data['money']}\nRank: {data['rank']}"
-            else:
-                slot_text = f"SLOT {i}\n(EMPTY)"
-            
-            btn = JuicyButton(slot_text)
-            btn.setFixedHeight(200) # Taller to fit multi-line stats
-            
-            # Shrink font slightly for filled slots so the info fits nicely
-            if data:
-                btn.setStyleSheet(btn.styleSheet().replace("font-size: 24px;", "font-size: 18px;"))
-
+            btn = JuicyButton("")
+            btn.setFixedHeight(200)
             btn.clicked.connect(lambda _, x=i: self.on_slot_selected(x))
-            self.slot_buttons.append(btn)
+            self.slot_buttons[i] = btn
             slot_layout.addWidget(btn)
         layout.addLayout(slot_layout)
 
@@ -319,13 +358,13 @@ class SaveSlotMenu(QWidget):
         self.name_input.setStyleSheet("""
             QLineEdit {
                 background-color: #ffffff;
-                border: 4px solid #f06292;
+                border: 4px solid %s;
                 border-radius: 15px;
                 padding: 10px;
                 font-size: 20px;
                 color: #3949ab;
             }
-        """)
+        """ % COLORS["accent"])
         details_layout.addWidget(self.name_input, alignment=Qt.AlignmentFlag.AlignCenter)
         
         layout.addLayout(details_layout)
@@ -342,37 +381,34 @@ class SaveSlotMenu(QWidget):
             btn = JuicyButton(level)
             btn.setMinimumHeight(50)
             btn.setFixedWidth(150)
-            btn.setStyleSheet("""
-                QPushButton {
-                    background-color: #bbdefb;
-                    border: 2px solid #ffffff;
-                    border-radius: 10px;
-                    font-weight: bold;
-                    padding: 5px;
-                    font-size: 14px;
-                }
-                QPushButton:hover { background-color: #e3f2fd; }
-            """)
             btn.clicked.connect(lambda _, l=level: self.set_difficulty(l))
             self.diff_buttons[level] = btn
             diff_layout.addWidget(btn)
+        
+        self.set_difficulty("NORMAL") # Initial highlight
         
         layout.addLayout(diff_layout)
         layout.addStretch(1)
 
         # Bottom Navigation
         nav_layout = QHBoxLayout()
-        back_btn = JuicyButton("◀ BACK")
-        back_btn.setFixedWidth(200)
-        back_btn.clicked.connect(lambda: self.switch_callback(0)) # Switch back to MainMenu (index 0)
-        
-        start_btn = JuicyButton("READY! ▶")
-        start_btn.setFixedWidth(300)
-        start_btn.clicked.connect(self.on_ready_clicked)
-        
+        self.back_btn = JuicyButton("◀ BACK")
+        self.back_btn.setFixedWidth(200)
+        self.back_btn.clicked.connect(lambda: self.switch_callback(Screen.MAIN_MENU))
+
+        self.delete_btn = JuicyButton("🗑 DELETE")
+        self.delete_btn.setFixedWidth(200)
+        self.delete_btn.clicked.connect(self.on_delete_clicked)
+        self.delete_btn.hide()
+
+        self.start_btn = JuicyButton("READY! ▶")
+        self.start_btn.setFixedWidth(300)
+        self.start_btn.clicked.connect(self.on_ready_clicked)
+
         nav_layout.addStretch()
-        nav_layout.addWidget(back_btn)
-        nav_layout.addWidget(start_btn)
+        nav_layout.addWidget(self.back_btn)
+        nav_layout.addWidget(self.delete_btn)
+        nav_layout.addWidget(self.start_btn)
         nav_layout.addStretch()
         layout.addLayout(nav_layout)
         layout.addSpacing(50) # Add some spacing at the bottom
@@ -382,20 +418,37 @@ class SaveSlotMenu(QWidget):
     def set_difficulty(self, level):
         self.selected_diff = level
         for name, btn in self.diff_buttons.items():
-            if name == level:
-                btn.setStyleSheet(btn.styleSheet() + "background-color: #f06292; color: white;")
-            else:
-                btn.setStyleSheet(btn.styleSheet().replace("background-color: #f06292; color: white;", ""))
+            is_selected = (name == level)
+            bg = COLORS["accent"] if is_selected else "#bbdefb"
+            txt = "white" if is_selected else COLORS["text_dark"]
+            border = "4px solid white" if is_selected else "2px solid #ffffff"
+            
+            btn.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: {bg};
+                    color: {txt};
+                    border: {border};
+                    border-radius: 10px;
+                    font-weight: bold;
+                    padding: 5px;
+                    font-size: 14px;
+                }}
+                QPushButton:hover {{ background-color: #e3f2fd; color: {COLORS["text_dark"]}; }}
+            """)
+
+    def update_slot_visuals(self):
+        """Synchronizes slot button text and highlighting with internal state."""
+        for i, btn in self.slot_buttons.items():
+            btn.setText(self.get_slot_text(i))
+            btn.selected = (i == self.selected_slot)
+
+        # Update delete button visibility (only show if slot has data)
+        has_data = self.selected_slot is not None and self.save_slots.get(self.selected_slot) is not None
+        self.delete_btn.setVisible(has_data)
 
     def on_slot_selected(self, slot_id):
         self.selected_slot = slot_id
-        
-        # Visual highlight for selection
-        for i, btn in enumerate(self.slot_buttons):
-            if i + 1 == slot_id:
-                btn.setStyleSheet(btn.styleSheet() + "border: 6px solid #ffffff; background-color: #ffd54f;")
-            else:
-                btn.setStyleSheet(btn.styleSheet().replace("border: 6px solid #ffffff; background-color: #ffd54f;", ""))
+        self.update_slot_visuals()
 
         data = self.save_slots.get(slot_id)
         if data:
@@ -404,6 +457,13 @@ class SaveSlotMenu(QWidget):
         else:
             self.name_input.clear() # Clear name input for new game
             self.set_difficulty('NORMAL')
+
+    def on_delete_clicked(self):
+        if self.selected_slot and self.save_slots.get(self.selected_slot):
+            self.save_slots[self.selected_slot] = None
+            self.save_to_file()
+            # Re-trigger selection logic to clear input fields and update visuals
+            self.on_slot_selected(self.selected_slot)
 
     def on_ready_clicked(self):
         if self.selected_slot is None:
@@ -424,50 +484,75 @@ class SaveSlotMenu(QWidget):
             self.save_slots[self.selected_slot]["difficulty"] = self.selected_diff
 
         self.save_to_file()
+        self.update_slot_visuals() # Update UI immediately before switching
         if self.switch_callback:
-            self.switch_callback(2, self.save_slots[self.selected_slot])
+            self.switch_callback(Screen.GAME, self.save_slots[self.selected_slot])
 
 
-class GameScreenPlaceholder(QWidget):
+class GameScreen(QWidget):
     def __init__(self, switch_callback=None):
         super().__init__()
         self.switch_callback = switch_callback
-        self.shop_data = {}
+        self.session = None
         self.init_ui()
 
     def update_game_data(self, data):
-        """Updates the UI with loaded save data."""
-        self.shop_data = data
+        """Initializes a new gameplay session with save data."""
+        self.session = data 
         self.game_label.setText(f"WELCOME TO {data['name'].upper()}!")
         self.stats_label.setText(f"Day: {data['day']} | Cash: ${data['money']} | Rank: {data['rank']}")
 
     def init_ui(self):
         layout = QVBoxLayout()
-        layout.addStretch(1)
         
-        self.game_label = QLabel("WELCOME TO THE GAME!")
+        # --- Header ---
+        header = QHBoxLayout()
+        self.game_label = QLabel("GAME LOADED")
         self.game_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.game_label.setStyleSheet("font-size: 48px; font-weight: bold; color: #ffffff; letter-spacing: 5px;")
-        layout.addWidget(self.game_label)
+        self.game_label.setStyleSheet("font-size: 32px; font-weight: bold; color: #ffffff;")
+        
+        exit_btn = JuicyButton("✖")
+        exit_btn.setFixedSize(60, 60)
+        exit_btn.clicked.connect(lambda: self.switch_callback(Screen.MAIN_MENU))
+        
+        header.addWidget(self.game_label, 1)
+        header.addWidget(exit_btn)
+        layout.addLayout(header)
 
         self.stats_label = QLabel("")
         self.stats_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.stats_label.setStyleSheet("font-size: 20px; color: #3e2723; background: #ffca28; padding: 10px; border-radius: 10px;")
         layout.addWidget(self.stats_label)
 
-        sub_label = QLabel("This is your placeholder game screen.")
-        sub_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        sub_label.setStyleSheet("font-size: 24px; color: #bbdefb;")
-        layout.addWidget(sub_label)
-
-        layout.addStretch(1)
+        # --- Gameplay Area ---
+        gameplay_layout = QHBoxLayout()
         
-        back_to_menu_btn = JuicyButton("◀ BACK TO MAIN MENU")
-        back_to_menu_btn.setFixedWidth(400)
-        if self.switch_callback:
-            back_to_menu_btn.clicked.connect(lambda: self.switch_callback(0))
-        layout.addWidget(back_to_menu_btn, alignment=Qt.AlignmentFlag.AlignCenter)
-        layout.addStretch(1)
+        # Left: Orders Panel
+        self.orders_panel = QVBoxLayout()
+        order_placeholder = QLabel("ORDERS\n(Waiting...)")
+        order_placeholder.setStyleSheet("background: rgba(0,0,0,50); color: white; border-radius: 15px; padding: 20px;")
+        order_placeholder.setFixedWidth(250)
+        self.orders_panel.addWidget(order_placeholder)
+        
+        # Middle: Prep Table
+        self.prep_table = QVBoxLayout()
+        table_placeholder = QLabel("PREP TABLE\n(Stack ingredients here!)")
+        table_placeholder.setStyleSheet("background: #efebe9; border: 5px dashed #a1887f; border-radius: 20px;")
+        table_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.prep_table.addWidget(table_placeholder)
+        
+        # Right: Inventory/Ingredients
+        self.ingredients_panel = QVBoxLayout()
+        ing_placeholder = QLabel("INGREDIENTS")
+        ing_placeholder.setStyleSheet("background: rgba(255,255,255,50); border-radius: 15px; padding: 10px;")
+        ing_placeholder.setFixedWidth(200)
+        self.ingredients_panel.addWidget(ing_placeholder)
+        
+        gameplay_layout.addLayout(self.orders_panel)
+        gameplay_layout.addLayout(self.prep_table, 1)
+        gameplay_layout.addLayout(self.ingredients_panel)
+        
+        layout.addLayout(gameplay_layout, 1)
 
         self.setLayout(layout)
 
@@ -477,17 +562,13 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("Over‑Scoped Sandwich Simulator")
 
-        # Resolve the absolute path to the music file
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        music_path = os.path.join(script_dir, "background_music.mp3")
-
         # Audio Setup
         self.audio_output = QAudioOutput()
         self.player = QMediaPlayer()
         self.player.setAudioOutput(self.audio_output)
 
-        if os.path.exists(music_path):
-            self.player.setSource(QUrl.fromLocalFile(music_path))
+        if MUSIC_FILE.exists():
+            self.player.setSource(QUrl.fromLocalFile(str(MUSIC_FILE)))
             self.player.setLoops(QMediaPlayer.Loops.Infinite)
         self.audio_output.setVolume(0.5)
         self.player.play()
@@ -515,9 +596,9 @@ class MainWindow(QMainWindow):
         self.setStyleSheet(
             """
             QMainWindow {
-                background-color: #81d4fa;  /* light sky blue */
+                background-color: %s;
             }
-            """
+            """ % COLORS["sky_top"]
         )
 
         # Main Stack to manage different screens
@@ -525,18 +606,18 @@ class MainWindow(QMainWindow):
         
         # Custom navigation logic
         def navigate(index, data=None):
-            if index == 2 and data:
+            if index == Screen.GAME and data:
                 # Update the game screen with data before switching
                 self.game_screen.update_game_data(data)
             self.stack.setCurrentIndex(index)
 
         self.main_menu = MainMenu(self.audio_output, navigate)
         self.save_menu = SaveSlotMenu(navigate)
-        self.game_screen = GameScreenPlaceholder(navigate)
+        self.game_screen = GameScreen(navigate)
         
-        self.stack.addWidget(self.main_menu) # Index 0
-        self.stack.addWidget(self.save_menu) # Index 1
-        self.stack.addWidget(self.game_screen) # Index 2
+        self.stack.addWidget(self.main_menu)
+        self.stack.addWidget(self.save_menu)
+        self.stack.addWidget(self.game_screen)
         
         self.setCentralWidget(self.stack)
 
